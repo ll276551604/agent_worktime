@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>工时拆解 Agent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .step-dot { transition: all 0.3s; }
+    .result-card { animation: fadeIn 0.4s ease; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+    #drop-zone.drag-over { border-color: #3b82f6; background: #eff6ff; }
+    .status-done   { color: #16a34a; }
+    .status-skip   { color: #9ca3af; }
+    .status-error  { color: #dc2626; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    .badge { display:inline-flex; align-items:center; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:500; }
+    .badge-blue   { background:#eff6ff; color:#3b82f6; }
+    .badge-green  { background:#f0fdf4; color:#16a34a; }
+    .badge-yellow { background:#fefce8; color:#ca8a04; }
+    .badge-red    { background:#fef2f2; color:#dc2626; }
+    .badge-gray   { background:#f3f4f6; color:#6b7280; }
+    .detail-panel { display:none; }
+    .detail-panel.open { display:block; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<div class="max-w-4xl mx-auto px-4 py-10">
+  <!-- Header -->
+  <div class="mb-8 text-center">
+    <h1 class="text-3xl font-bold text-gray-800">工时拆解 Agent</h1>
+    <p class="text-gray-500 mt-2">上传 Excel → AI 重建功能点 → 工时评估 → 评审 → 下载结果</p>
+    <div class="flex justify-center gap-2 mt-3 flex-wrap">
+      <span class="badge badge-blue">功能点重建</span>
+      <span class="badge badge-green">工时评估</span>
+      <span class="badge badge-yellow">需求评审</span>
+      <span class="badge badge-gray">知识库驱动</span>
+    </div>
+  </div>
+
+  <!-- Step 1: 上传 -->
+  <div class="bg-white rounded-2xl shadow-sm p-6 mb-5" id="section-upload">
+    <h2 class="font-semibold text-gray-700 mb-4">Step 1 · 上传 Excel 文件</h2>
+    <div id="drop-zone"
+         class="border-2 border-dashed border-gray-300 rounded-xl p-12 text-center cursor-pointer hover:border-blue-400 transition-colors"
+         onclick="document.getElementById('file-input').click()">
+      <svg class="mx-auto h-12 w-12 text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+      </svg>
+      <p class="text-gray-500">拖拽或点击选择 <span class="text-blue-500 font-medium">.xlsx</span> 文件</p>
+      <p class="text-xs text-gray-400 mt-1">最大 10MB</p>
+      <input type="file" id="file-input" accept=".xlsx" class="hidden">
+    </div>
+    <div id="upload-info" class="hidden mt-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-700 flex items-center gap-2">
+      <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <span id="upload-info-text"></span>
+    </div>
+  </div>
+
+  <!-- Step 2: 配置 -->
+  <div class="bg-white rounded-2xl shadow-sm p-6 mb-5 hidden" id="section-config">
+    <h2 class="font-semibold text-gray-700 mb-4">Step 2 · 配置参数</h2>
+    <div class="grid grid-cols-1 gap-4">
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">选择模型</label>
+        <select id="model-select"
+                class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white">
+          <option value="">加载中...</option>
+        </select>
+      </div>
+      <div class="flex items-center gap-3">
+        <input id="skip-filled" type="checkbox" checked class="w-4 h-4 rounded text-blue-500">
+        <label for="skip-filled" class="text-sm text-gray-600">跳过 G 列已有内容的行（不重复生成）</label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3: 需求预览 -->
+  <div class="bg-white rounded-2xl shadow-sm p-6 mb-5 hidden" id="section-preview">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="font-semibold text-gray-700">Step 3 · 需求预览</h2>
+      <span id="row-count" class="text-sm text-gray-400"></span>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-gray-400 border-b">
+            <th class="pb-2 pr-4">行号</th>
+            <th class="pb-2 pr-4">功能模块</th>
+            <th class="pb-2 pr-4">需求名称</th>
+            <th class="pb-2 pr-4">描述摘要</th>
+            <th class="pb-2">状态</th>
+          </tr>
+        </thead>
+        <tbody id="preview-tbody" class="divide-y divide-gray-50"></tbody>
+      </table>
+    </div>
+    <div class="mt-5 text-right">
+      <button id="btn-start"
+              class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2.5 rounded-xl font-medium transition-colors">
+        开始生成
+      </button>
+    </div>
+  </div>
+
+  <!-- Step 4: 进度 -->
+  <div class="bg-white rounded-2xl shadow-sm p-6 mb-5 hidden" id="section-progress">
+    <h2 class="font-semibold text-gray-700 mb-4">Step 4 · 处理进度</h2>
+    <div class="flex items-center gap-3 mb-2">
+      <div class="flex-1 bg-gray-100 rounded-full h-2.5">
+        <div id="progress-bar" class="bg-blue-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div>
+      </div>
+      <span id="progress-text" class="text-sm text-gray-500 whitespace-nowrap">0 / 0</span>
+    </div>
+    <p id="progress-status" class="text-xs text-gray-400 mb-4"></p>
+    <div id="live-results" class="space-y-2 max-h-80 overflow-y-auto"></div>
+  </div>
+
+  <!-- Step 5: 下载 -->
+  <div class="hidden text-center" id="section-download">
+    <div class="bg-green-50 border border-green-200 rounded-2xl p-8">
+      <svg class="mx-auto h-12 w-12 text-green-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <p class="text-green-700 font-semibold text-lg mb-2">处理完成！</p>
+      <p class="text-sm text-gray-500 mb-4">
+        已回填：G列（页面×功能点拆解 + 产品工时）· N列（工时天数，可求和）
+      </p>
+      <a id="download-btn" href="#"
+         class="inline-block bg-green-500 hover:bg-green-600 text-white px-8 py-3 rounded-xl font-medium transition-colors">
+        下载结果 Excel
+      </a>
+      <p class="text-xs text-gray-400 mt-4">
+        <button onclick="location.reload()" class="underline hover:text-gray-600">处理新文件</button>
+      </p>
+    </div>
+  </div>
+
+  <!-- 错误提示 -->
+  <div id="error-banner" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm"></div>
+</div>
+
+<script>
+  let fileId = null;
+
+  // ---- 加载模型列表 ----
+  (async () => {
+    try {
+      const resp = await fetch('/models');
+      const data = await resp.json();
+      const sel = document.getElementById('model-select');
+      sel.innerHTML = data.models.map(m =>
+        `<option value="${m.id}" ${m.id === data.default ? 'selected' : ''}>${m.label}</option>`
+      ).join('');
+    } catch (e) {
+      document.getElementById('model-select').innerHTML = '<option value="">加载失败</option>';
+    }
+  })();
+
+  // ---- 拖拽上传 ----
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) handleFile(file);
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) handleFile(fileInput.files[0]);
+  });
+
+  async function handleFile(file) {
+    if (!file.name.endsWith('.xlsx')) { showError('请上传 .xlsx 格式的文件'); return; }
+    if (file.size > 10 * 1024 * 1024) { showError('文件超过 10MB 限制'); return; }
+
+    clearError();
+    const infoEl = document.getElementById('upload-info');
+    const infoText = document.getElementById('upload-info-text');
+    infoEl.classList.remove('hidden');
+    infoText.textContent = '上传中...';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const resp = await fetch('/upload', { method: 'POST', body: formData });
+      const data = await resp.json();
+      if (data.error) { showError(data.error); infoEl.classList.add('hidden'); return; }
+
+      fileId = data.file_id;
+      infoText.textContent = `已解析 ${data.total} 行需求 · ${data.filename}`;
+
+      // 渲染预览表格
+      renderPreview(data.rows);
+      show('section-config');
+      show('section-preview');
+    } catch (e) {
+      showError('上传失败：' + e.message);
+      infoEl.classList.add('hidden');
+    }
+  }
+
+  function renderPreview(rows) {
+    document.getElementById('row-count').textContent = `共 ${rows.length} 行`;
+    const tbody = document.getElementById('preview-tbody');
+    tbody.innerHTML = rows.map(r => `
+      <tr class="hover:bg-gray-50">
+        <td class="py-2 pr-4 text-gray-400">${r.row}</td>
+        <td class="py-2 pr-4 text-gray-600 max-w-[100px] truncate">${esc(r.module)}</td>
+        <td class="py-2 pr-4 font-medium text-gray-700 max-w-[140px] truncate">${esc(r.feature)}</td>
+        <td class="py-2 pr-4 text-gray-500 max-w-[180px] truncate">${esc(r.detail)}</td>
+        <td class="py-2">
+          ${r.has_g
+            ? '<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">已填写</span>'
+            : '<span class="text-xs bg-blue-50 text-blue-500 px-2 py-0.5 rounded">待生成</span>'}
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  // ---- 开始处理 ----
+  document.getElementById('btn-start').addEventListener('click', async () => {
+    if (!fileId) return;
+    clearError();
+
+    const modelId = document.getElementById('model-select').value;
+    const skipFilled = document.getElementById('skip-filled').checked;
+
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-start').textContent = '处理中...';
+
+    show('section-progress');
+
+    try {
+      const resp = await fetch('/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_id: fileId, model_id: modelId, skip_filled: skipFilled }),
+      });
+      const data = await resp.json();
+      if (data.error) { showError(data.error); return; }
+
+      listenProgress(data.task_id);
+    } catch (e) {
+      showError('启动失败：' + e.message);
+    }
+  });
+
+  function listenProgress(taskId) {
+    const es = new EventSource(`/progress/${taskId}`);
+    const bar = document.getElementById('progress-bar');
+    const progressText = document.getElementById('progress-text');
+    const statusEl = document.getElementById('progress-status');
+    const resultsEl = document.getElementById('live-results');
+
+    es.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.done) {
+        es.close();
+        bar.style.width = '100%';
+        progressText.textContent = '完成';
+        show('section-download');
+        document.getElementById('download-btn').href = `/download/${encodeURIComponent(msg.filename)}`;
+        document.getElementById('download-btn').download = msg.filename;
+        return;
+      }
+
+      if (msg.error) {
+        es.close();
+        showError('处理出错：' + msg.error);
+        return;
+      }
+
+      // 更新进度
+      const pct = Math.round((msg.current / msg.total) * 100);
+      bar.style.width = pct + '%';
+      progressText.textContent = `${msg.current} / ${msg.total}`;
+      statusEl.textContent = `正在处理第 ${msg.row} 行...`;
+
+      // 实时结果卡片
+      const statusClass = msg.status === 'done' ? 'status-done' : msg.status === 'skipped' ? 'status-skip' : 'status-error';
+      const icon = msg.status === 'done' ? '✓' : msg.status === 'skipped' ? '⊘' : '✗';
+
+      let pageBadge = '';
+      if (msg.page_count > 0) {
+        pageBadge = `<span class="badge badge-blue ml-1">${msg.page_count}个页面</span>`;
+      }
+
+      const card = document.createElement('div');
+      card.className = 'result-card bg-gray-50 rounded-lg px-3 py-2 text-sm';
+      card.innerHTML = `
+        <div class="flex items-start gap-2">
+          <span class="${statusClass} font-bold mt-0.5 shrink-0">${icon}</span>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center flex-wrap gap-1">
+              <span class="text-gray-400 text-xs">行 ${msg.row}</span>
+              ${pageBadge}
+            </div>
+            <p class="text-gray-600 mt-0.5 truncate">${esc(msg.preview || '')}</p>
+          </div>
+        </div>
+      `;
+      resultsEl.appendChild(card);
+      resultsEl.scrollTop = resultsEl.scrollHeight;
+    };
+
+    es.onerror = () => {
+      es.close();
+      showError('连接中断，请刷新页面重试');
+    };
+  }
+
+  // ---- 工具函数 ----
+  function show(id) { document.getElementById(id).classList.remove('hidden'); }
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  function showError(msg) {
+    const el = document.getElementById('error-banner');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  function clearError() {
+    document.getElementById('error-banner').classList.add('hidden');
+  }
+</script>
+</body>
+</html>
