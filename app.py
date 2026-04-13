@@ -7,23 +7,52 @@ import queue
 import threading
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 
 from flask import Flask, request, jsonify, Response, send_file, render_template
 from werkzeug.utils import secure_filename
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import UPLOAD_FOLDER, OUTPUT_FOLDER, MAX_UPLOAD_SIZE, AVAILABLE_MODELS, DEFAULT_MODEL
+from config import UPLOAD_FOLDER, OUTPUT_FOLDER, MAX_UPLOAD_SIZE, AVAILABLE_MODELS, DEFAULT_MODEL, AppConfig
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
+
+def setup_logging():
+    """配置日志系统"""
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # 避免重复添加处理器
+    if logger.handlers:
+        logger.handlers.clear()
+    
+    # 格式设置
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # 控制台输出
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # 文件输出（自动轮转，保留最近5个文件，每个最大10MB）
+    file_handler = RotatingFileHandler(
+        'app.log',
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+
+# 初始化日志
+setup_logging()
 logger = logging.getLogger(__name__)
+
+# 初始化目录
+AppConfig.init_folders()
 
 from excel import reader
 from agent import worktime_agent
@@ -32,8 +61,54 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 app.config['TIMEOUT'] = 300  # 5分钟超时
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# ============================================================
+# 全局异常处理
+# ============================================================
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """全局异常处理器"""
+    logger.error(f"未处理的异常: {str(e)}", exc_info=True)
+    return jsonify({
+        "success": False,
+        "error": "服务器内部错误，请稍后重试"
+    }), 500
+
+
+@app.errorhandler(400)
+def handle_bad_request(e):
+    """处理请求参数错误"""
+    return jsonify({
+        "success": False,
+        "error": str(e)
+    }), 400
+
+
+@app.errorhandler(403)
+def handle_forbidden(e):
+    """处理禁止访问"""
+    return jsonify({
+        "success": False,
+        "error": "访问被拒绝"
+    }), 403
+
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    """处理资源未找到"""
+    return jsonify({
+        "success": False,
+        "error": "资源未找到"
+    }), 404
+
+
+@app.errorhandler(413)
+def handle_request_too_large(e):
+    """处理文件过大"""
+    return jsonify({
+        "success": False,
+        "error": f"上传文件大小超过限制（最大 {MAX_UPLOAD_SIZE//1024//1024}MB）"
+    }), 413
 
 # 存储上传文件信息和任务进度队列
 uploaded_files = {}   # file_id -> filepath
@@ -117,7 +192,7 @@ def delete_session(session_id):
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """聊天接口（支持智能引导对话和评估）"""
+    """聊天接口（智能识别+直接评估模式）"""
     from agent.session_manager import SessionManager, ChatSession
     from agent.dialog_manager import DialogManager
     
@@ -151,20 +226,55 @@ def chat():
     
     logger.info(f"聊天请求: session={session_id}, message_length={len(message)}")
 
-    # 提取已收集的需求信息
+    # ============== 智能分析用户输入 ==============
+    # 使用增强版的分析方法，自动识别模块和需求类型
     info = dm.extract_requirement_info(conversation_history)
     
-    # 检查信息是否完整
-    if dm.check_info_complete(info):
-        # 信息完整，执行评估
-        logger.info(f"需求信息完整，开始评估: {info}")
+    # ============== 检查并补充默认值 ==============
+    # 直接检查信息完整性（会自动补充默认值）
+    is_complete = dm.check_info_complete(info)
+    
+    # 记录自动识别结果
+    auto_detected_info = {
+        'module_detected': bool(info.get('auto_detected', {}).get('module')),
+        'type_detected': bool(info.get('auto_detected', {}).get('type'))
+    }
+    logger.info(f"自动识别结果: 模块={info.get('module')}, 类型={info.get('type')}, 自动识别={auto_detected_info}")
+    
+    # ============== 直接执行评估 ==============
+    # 只要有需求描述就直接评估，不再追问
+    if is_complete:
+        logger.info(f"开始评估: 模块={info['module']}, 类型={info['type']}")
         
         try:
             # 构建完整的需求描述
             full_requirement = f"【模块】{info['module']} 【类型】{info['type']} 【描述】{info['requirement']}"
             
             eval_result = worktime_agent.evaluate_text_requirement(full_requirement, "composite")
-            session.add_message("assistant", eval_result.get("formatted_result", ""))
+            formatted_result = eval_result.get("formatted_result", "")
+            
+            # 构建响应消息，显示自动识别的内容
+            auto_detected_note = ""
+            if info.get('auto_detected', {}).get('module'):
+                auto_detected_note += f"已自动识别模块：{info['module']}；"
+            if info.get('auto_detected', {}).get('type'):
+                auto_detected_note += f"已自动识别类型：{info['type']}"
+            
+            # 如果有未识别的项，提示用户可以修改
+            note_lines = []
+            if not info.get('auto_detected', {}).get('module') and info['module'] == '未指定模块':
+                note_lines.append("⚠️ 模块未识别，请确认是否需要调整")
+            if not info.get('auto_detected', {}).get('type') and info['type'] == '新增功能':
+                note_lines.append("⚠️ 需求类型未识别，默认按新增功能评估")
+            
+            if note_lines:
+                note_lines.append("如需修改，请直接说明（如：修改为订单管理模块/Bug修复）")
+                formatted_result = f"【注意】{' | '.join(note_lines)}\n\n" + formatted_result
+            
+            if auto_detected_note:
+                formatted_result = f"【智能识别】{auto_detected_note}\n\n" + formatted_result
+            
+            session.add_message("assistant", formatted_result)
             
             return jsonify({
                 "success": True,
@@ -173,22 +283,24 @@ def chat():
                 "decomposition": eval_result["decomposition"],
                 "evaluation": eval_result["evaluation"],
                 "stage": "assessment",
-                "collected_info": info
+                "collected_info": info,
+                "auto_detected": auto_detected_info,
+                "formatted_result": formatted_result
             })
         except Exception as e:
             logger.error(f"智能评估失败: {e}")
             return jsonify({"error": f"评估失败: {str(e)}"}), 500
     else:
-        # 信息不完整，进行追问
-        question = dm.get_next_question(info)
-        session.add_message("assistant", question)
+        # 只有需求描述为空时才追问
+        session.add_message("assistant", "请描述一下具体的需求内容~")
         
         return jsonify({
             "success": True,
             "session_id": session_id,
-            "message": question,
+            "message": "请描述一下具体的需求内容~",
             "stage": "collecting",
-            "collected_info": info
+            "collected_info": info,
+            "auto_detected": auto_detected_info
         })
 
 
@@ -356,12 +468,27 @@ def process_text():
 
 @app.route("/download/<path:filename>")
 def download(filename):
-    filepath = os.path.join(OUTPUT_FOLDER, filename)
+    # 1. 安全过滤文件名（移除路径字符）
+    safe_filename = secure_filename(filename)
+    
+    # 2. 构建完整路径
+    filepath = os.path.join(OUTPUT_FOLDER, safe_filename)
+    
+    # 3. 强制校验：确保路径在允许范围内
+    abs_output_folder = os.path.abspath(OUTPUT_FOLDER)
+    abs_filepath = os.path.abspath(filepath)
+    
+    if not abs_filepath.startswith(abs_output_folder):
+        logger.warning(f"非法路径访问尝试: {filename}")
+        return jsonify({"error": "无效的文件请求"}), 403
+    
+    # 4. 检查文件是否存在
     if not os.path.exists(filepath):
         logger.warning(f"下载文件不存在: {filename}")
         return jsonify({"error": "文件不存在"}), 404
-    logger.info(f"文件下载: {filename}")
-    return send_file(filepath, as_attachment=True, download_name=filename)
+    
+    logger.info(f"文件下载: {safe_filename}")
+    return send_file(filepath, as_attachment=True, download_name=safe_filename)
 
 
 # ============================================================

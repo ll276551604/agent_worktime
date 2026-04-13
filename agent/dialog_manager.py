@@ -13,6 +13,33 @@ class DialogManager:
         # 延迟导入知识库管理器，避免循环依赖
         self.knowledge_manager = None
         
+        # 业务模块关键词库（增强版）
+        self.module_keywords = {
+            '用户管理': ['用户', '登录', '注册', '账号', '个人中心', '权限', '角色', '会员', '账户', '登录页', '注册页', '个人资料'],
+            '订单管理': ['订单', '下单', '购物车', '支付', '退款', '发货', '物流', '订单列表', '订单详情', '结算'],
+            '报表系统': ['报表', '统计', '数据', '图表', '分析', 'dashboard', '仪表盘', '看板', '数据可视化'],
+            '商品管理': ['商品', '产品', '库存', 'SKU', '价格', '上架', '下架', '商品列表', '商品详情', '商品分类'],
+            '配置管理': ['配置', '设置', '参数', '选项', '偏好', '系统配置', '参数配置'],
+            '系统设置': ['系统', '全局', '基础', '后台', '管理', '系统管理', '后台管理'],
+            '数据管理': ['数据', '导入', '导出', '同步', '备份', '数据迁移', '数据清洗'],
+            '消息通知': ['消息', '通知', '推送', '邮件', '短信', '提醒', '站内信', '消息中心'],
+            '审批流程': ['审批', '流程', '审核', '工单', '审批流程', '工作流'],
+            '营销活动': ['活动', '营销', '促销', '优惠券', '红包', '满减', '团购', '秒杀'],
+            '内容管理': ['内容', '文章', '新闻', '资讯', '发布', '编辑', '栏目'],
+            '搜索功能': ['搜索', '查询', '筛选', '过滤', '关键词'],
+            '移动端': ['手机', '移动端', 'APP', '小程序', 'H5'],
+            '接口开发': ['接口', 'API', '接口开发', 'API对接', '第三方接口'],
+        }
+        
+        # 需求类型关键词（增强版）
+        self.type_keywords = {
+            '新增功能': ['新增', '添加', '创建', '开发', '实现', '构建', '新建', '开发新功能', '新增需求'],
+            '调整优化': ['调整', '优化', '改进', '修改', '更新', '升级', '增强', '改善', '提升', '改造'],
+            'Bug修复': ['bug', '问题', '错误', '修复', '解决', '异常', '缺陷', 'bug修复', '修复bug'],
+            '重构': ['重构', '重构代码', '代码优化', '架构优化'],
+            '技术债务': ['技术债务', '技术债', '代码清理'],
+        }
+    
     def _load_prompt(self) -> str:
         """加载系统提示词"""
         if os.path.exists(self.prompt_path):
@@ -78,7 +105,7 @@ class DialogManager:
         if self.knowledge_manager is None:
             from agent.knowledge_manager import KnowledgeManager
             self.knowledge_manager = KnowledgeManager()
-        
+    
     def _analyze_from_knowledge_base(self, requirement_text: str) -> Dict:
         """通过知识库智能分析需求，识别模块和需求类型"""
         self._init_knowledge_manager()
@@ -117,92 +144,134 @@ class DialogManager:
         
         return result
     
+    def _extract_module_by_keyword(self, text: str) -> str:
+        """通过关键词匹配识别业务模块"""
+        text_lower = text.lower()
+        
+        for module, keywords in self.module_keywords.items():
+            for keyword in keywords:
+                if keyword in text or keyword.lower() in text_lower:
+                    return module
+        
+        return ''
+    
+    def _extract_type_by_keyword(self, text: str) -> str:
+        """通过关键词匹配识别需求类型"""
+        text_lower = text.lower()
+        
+        # Bug修复优先级最高（因为可能同时包含"修复"和"新增"等词）
+        for keyword in self.type_keywords['Bug修复']:
+            if keyword in text or keyword.lower() in text_lower:
+                return 'Bug修复'
+        
+        # 然后检查新增功能
+        for keyword in self.type_keywords['新增功能']:
+            if keyword in text or keyword.lower() in text_lower:
+                return '新增功能'
+        
+        # 最后检查调整优化
+        for keyword in self.type_keywords['调整优化']:
+            if keyword in text or keyword.lower() in text_lower:
+                return '调整优化'
+        
+        return ''
+    
     def extract_requirement_info(self, conversation_history: List[Dict]) -> Dict[str, str]:
         """从对话历史中提取需求信息（结合知识库智能分析）"""
         info = {
             'requirement': '',
             'module': '',
-            'type': ''
+            'type': '',
+            'auto_detected': {
+                'module': False,
+                'type': False
+            }
         }
         
+        # 收集所有用户消息
+        user_messages = []
         for msg in conversation_history:
-            if msg['role'] != 'user':
-                continue
-            
-            content = msg['content']
-            
-            # 累积需求描述
-            if content:
-                if info['requirement']:
-                    info['requirement'] += ' ' + content
-                else:
-                    info['requirement'] = content
+            if msg['role'] == 'user':
+                user_messages.append(msg['content'])
         
-        requirement_text = info['requirement']
+        # 合并所有用户消息作为需求描述
+        requirement_text = ' '.join(user_messages).strip()
+        info['requirement'] = requirement_text
         
-        # 首先使用规则匹配提取模块和类型（优先级更高）
+        if not requirement_text:
+            return info
+        
+        # ============== 第一步：规则匹配识别（优先级最高）==============
+        
         # 尝试提取模块信息
-        module_patterns = [
-            r'(用户管理|订单管理|报表系统|权限管理|配置管理|数据分析|系统设置)',
-            r'(模块|系统|功能)[:：]\s*(\w+)'
-        ]
-        for pattern in module_patterns:
-            match = re.search(pattern, requirement_text)
-            if match and not info['module']:
-                info['module'] = match.group(1)
+        module_from_rule = self._extract_module_by_keyword(requirement_text)
+        if module_from_rule:
+            info['module'] = module_from_rule
+            info['auto_detected']['module'] = True
         
-        # 尝试提取需求类型（规则匹配优先）
-        if 'bug' in requirement_text.lower() or '修复' in requirement_text:
-            info['type'] = 'Bug修复'
-        elif '新增' in requirement_text:
-            info['type'] = '新增功能'
-        elif any(word in requirement_text for word in ['调整', '优化', '修改', '改进']):
-            info['type'] = '调整优化'
+        # 尝试提取需求类型
+        type_from_rule = self._extract_type_by_keyword(requirement_text)
+        if type_from_rule:
+            info['type'] = type_from_rule
+            info['auto_detected']['type'] = True
         
-        # 如果规则匹配未能识别，则通过知识库智能分析
-        if info['requirement'] and (not info['module'] or not info['type']):
-            kb_result = self._analyze_from_knowledge_base(info['requirement'])
+        # ============== 第二步：如果规则匹配未能识别，使用知识库分析 ==============
+        
+        if (not info['module'] or not info['type']):
+            kb_result = self._analyze_from_knowledge_base(requirement_text)
             
-            # 如果知识库分析有较高置信度，使用分析结果
+            # 如果知识库分析有较高置信度（>=0.6），使用分析结果
             if kb_result['confidence'] >= 0.6:
                 if kb_result['module'] and not info['module']:
                     info['module'] = kb_result['module']
+                    info['auto_detected']['module'] = True
                 if kb_result['type'] and not info['type']:
                     info['type'] = kb_result['type']
+                    info['auto_detected']['type'] = True
         
         return info
     
     def check_info_complete(self, info: Dict) -> bool:
-        """检查信息是否完整"""
-        return all([
-            info.get('requirement', '').strip(),
-            info.get('module', '').strip(),
-            info.get('type', '').strip()
-        ])
+        """检查信息是否完整（需求描述是必须的，模块和类型可以使用默认值）"""
+        requirement = info.get('requirement', '').strip()
+        
+        # 只要有需求描述就认为可以进行评估
+        if not requirement:
+            return False
+        
+        # 如果模块或类型未识别，使用默认值
+        if not info.get('module', '').strip():
+            info['module'] = '未指定模块'
+            info['auto_detected']['module'] = False
+        
+        if not info.get('type', '').strip():
+            info['type'] = '新增功能'  # 默认视为新增功能
+            info['auto_detected']['type'] = False
+        
+        return True
     
     def get_next_question(self, info: Dict) -> Optional[str]:
         """获取下一个需要追问的问题（智能确认已识别信息）"""
         requirement = info.get('requirement', '').strip()
         module = info.get('module', '').strip()
         req_type = info.get('type', '').strip()
+        auto_detected = info.get('auto_detected', {})
         
         # 如果需求描述为空
         if not requirement:
-            return '好的，请描述一下具体的需求内容~'
+            return '请描述一下具体的需求内容~'
         
         # 如果模块为空
         if not module:
-            # 如果已有部分信息，先确认已识别的内容
-            if req_type:
-                return f'已识别需求类型为「{req_type}」。请问这个需求属于哪个业务模块呢？（比如：用户管理、订单管理、报表系统等）'
-            return '请问这个需求属于哪个业务模块呢？（比如：用户管理、订单管理、报表系统等）'
+            # 提供模块选择建议
+            module_list = ', '.join(self.module_keywords.keys())
+            return f'请问这个需求属于哪个业务模块呢？（如：{module_list}）'
         
         # 如果需求类型为空
         if not req_type:
-            # 确认已识别的模块，并询问类型
-            return f'已识别需求属于「{module}」模块。这是新增功能、调整优化还是Bug修复呢？'
+            return f'这个需求是新增功能、调整优化还是Bug修复呢？'
         
-        # 信息完整，返回None
+        # 信息完整，返回None表示可以直接评估
         return None
     
     def build_prompt(self, conversation_history: List[Dict]) -> str:
@@ -229,3 +298,54 @@ class DialogManager:
             except json.JSONDecodeError:
                 return None
         return None
+    
+    def analyze_and_extract(self, requirement_text: str) -> Dict:
+        """
+        智能分析需求文本，自动提取所有信息
+        :param requirement_text: 用户输入的需求文本
+        :return: 包含需求描述、模块、类型的字典
+        """
+        info = {
+            'requirement': requirement_text.strip(),
+            'module': '',
+            'type': '',
+            'auto_detected': {
+                'module': False,
+                'type': False
+            },
+            'confidence': 0.0
+        }
+        
+        if not info['requirement']:
+            return info
+        
+        # 第一步：规则匹配识别
+        module_from_rule = self._extract_module_by_keyword(requirement_text)
+        type_from_rule = self._extract_type_by_keyword(requirement_text)
+        
+        if module_from_rule:
+            info['module'] = module_from_rule
+            info['auto_detected']['module'] = True
+        
+        if type_from_rule:
+            info['type'] = type_from_rule
+            info['auto_detected']['type'] = True
+        
+        # 第二步：知识库分析作为补充
+        if not info['module'] or not info['type']:
+            kb_result = self._analyze_from_knowledge_base(requirement_text)
+            
+            if kb_result['confidence'] >= 0.5:
+                if kb_result['module'] and not info['module']:
+                    info['module'] = kb_result['module']
+                    info['auto_detected']['module'] = True
+                if kb_result['type'] and not info['type']:
+                    info['type'] = kb_result['type']
+                    info['auto_detected']['type'] = True
+            
+            info['confidence'] = kb_result['confidence']
+        else:
+            # 如果规则匹配成功，置信度设为较高值
+            info['confidence'] = 0.8
+        
+        return info

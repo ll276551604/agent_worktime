@@ -889,6 +889,28 @@
 
   document.getElementById('btn-new').addEventListener('click', resetAll);
 
+  function initWelcomeMessage() {
+    const container = document.getElementById('content-area');
+    const existingWelcomeMsg = document.getElementById('welcome-message');
+    if (existingWelcomeMsg) {
+      existingWelcomeMsg.remove();
+    }
+    const welcomeMsg = document.createElement('div');
+    welcomeMsg.className = 'welcome-message';
+    welcomeMsg.id = 'welcome-message';
+    welcomeMsg.innerHTML = `
+      <h2>智能工时评估助手</h2>
+      <p>欢迎使用智能工时评估助手！我将帮助您快速分析需求并估算开发工时。</p>
+      <div class="info-panel">
+        <div class="info-item">1. 输入需求描述（如：用户管理模块添加导出功能）</div>
+        <div class="info-item">2. 系统自动识别业务模块和需求类型</div>
+        <div class="info-item">3. 获取专业的工时评估报告</div>
+      </div>
+    `;
+    container.insertBefore(welcomeMsg, document.getElementById('messages-container'));
+    scrollTop();
+  }
+
   function renderSidebar() {
     const list = document.getElementById('sidebar-list');
     if (sessions.length === 0) {
@@ -1282,28 +1304,6 @@
       showError('连接中断，请刷新重试');
       document.getElementById('btn-send').disabled = false;
     };
-  }
-
-  function initWelcomeMessage() {
-    const container = document.getElementById('content-area');
-    const existingWelcomeMsg = document.getElementById('welcome-message');
-    if (existingWelcomeMsg) {
-      existingWelcomeMsg.remove();
-    }
-    const welcomeMsg = document.createElement('div');
-    welcomeMsg.className = 'welcome-message';
-    welcomeMsg.id = 'welcome-message';
-    welcomeMsg.innerHTML = `
-      <h2>智能工时评估助手</h2>
-      <p>欢迎使用智能工时评估助手！我将帮助您快速分析需求并估算开发工时。</p>
-      <div class="info-panel">
-        <div class="info-item">1. 输入需求描述（如：用户管理模块添加导出功能）</div>
-        <div class="info-item">2. 系统自动识别业务模块和需求类型</div>
-        <div class="info-item">3. 获取专业的工时评估报告</div>
-      </div>
-    `;
-    container.insertBefore(welcomeMsg, document.getElementById('messages-container'));
-    scrollTop();
   }
 
   function resetAll() {

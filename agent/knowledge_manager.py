@@ -9,6 +9,7 @@
 import os
 import json
 import re
+import time
 import logging
 from typing import List, Dict, Any
 
@@ -20,16 +21,29 @@ class KnowledgeManager:
     def __init__(self):
         self.kb_cache = {}
         self.code_kb_cache = {}
+        self._load_time = 0
+        self._cache_ttl = 3600  # 缓存有效期 1 小时
     
-    def load_all_knowledge(self) -> Dict[str, Any]:
-        """加载所有知识库"""
-        return {
+    def load_all_knowledge(self, force_reload=False) -> Dict[str, Any]:
+        """加载所有知识库（带缓存）"""
+        now = time.time()
+        
+        # 如果缓存有效且不强制刷新，直接返回缓存
+        if self.kb_cache and not force_reload and (now - self._load_time) < self._cache_ttl:
+            return self.kb_cache
+        
+        # 重新加载
+        self.kb_cache = {
             "system_caps": self._load_system_caps(),
             "feature_rules": self._load_feature_rules(),
             "worktime_rules": self._load_worktime_rules(),
             "business_docs": self._load_business_docs(),
             "code_knowledge": self._load_code_knowledge(),
         }
+        self._load_time = now
+        
+        logger.info("知识库加载完成")
+        return self.kb_cache
     
     def _load_system_caps(self) -> Dict:
         """加载系统能力（已有模块和功能）"""

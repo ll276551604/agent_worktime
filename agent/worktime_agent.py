@@ -3,6 +3,7 @@ import time
 import sys
 import os
 import logging
+import hashlib
 from typing import List, Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -13,7 +14,35 @@ from excel import reader, writer
 from agent.graph import build_graph, KnowledgeLoader
 from agent.knowledge_manager import get_knowledge_manager
 from agent.evaluation_models import evaluate_requirement
-from config import REQUEST_DELAY
+from config import REQUEST_DELAY, AppConfig
+
+# 评估结果缓存（简单的内存缓存）
+_evaluation_cache = {}
+_CACHE_MAX_SIZE = AppConfig.EVALUATION_CACHE_MAX_SIZE
+
+
+def _generate_cache_key(req: Dict) -> str:
+    """生成需求的唯一缓存键"""
+    content = f"{req.get('module','')}|{req.get('feature','')}|{req.get('detail','')}"
+    return hashlib.md5(content.encode()).hexdigest()
+
+
+def _get_cached_result(req: Dict) -> Dict:
+    """获取缓存的评估结果"""
+    key = _generate_cache_key(req)
+    return _evaluation_cache.get(key)
+
+
+def _set_cached_result(req: Dict, result: Dict):
+    """设置评估结果到缓存"""
+    key = _generate_cache_key(req)
+    
+    # 淘汰策略：超过最大缓存数时删除最早的记录
+    if len(_evaluation_cache) >= _CACHE_MAX_SIZE:
+        oldest_key = next(iter(_evaluation_cache))
+        del _evaluation_cache[oldest_key]
+    
+    _evaluation_cache[key] = result
 
 
 def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
@@ -57,7 +86,14 @@ def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
                 "detail": row_data.get("detail", "")
             }
             
-            eval_result = evaluate_requirement(requirement, "composite")
+            # 检查缓存
+            cached_result = _get_cached_result(requirement)
+            if cached_result:
+                logger.info(f"[Agent] 命中缓存: 行 {row_num}")
+                eval_result = cached_result
+            else:
+                eval_result = evaluate_requirement(requirement, "composite")
+                _set_cached_result(requirement, eval_result)
             
             g_text = format_eval_result_for_g_column(eval_result)
             total_days = eval_result["evaluation"]["effort_days"]
