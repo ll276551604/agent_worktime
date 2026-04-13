@@ -1,181 +1,876 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>工时拆解 Agent</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <title>AI 工时评估助手</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
-    .step-dot { transition: all 0.3s; }
-    .result-card { animation: fadeIn 0.4s ease; }
-    @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
-    #drop-zone.drag-over { border-color: #3b82f6; background: #eff6ff; }
-    .status-done   { color: #16a34a; }
-    .status-skip   { color: #9ca3af; }
-    .status-error  { color: #dc2626; }
-    pre { white-space: pre-wrap; word-break: break-word; }
-    .badge { display:inline-flex; align-items:center; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:500; }
-    .badge-blue   { background:#eff6ff; color:#3b82f6; }
-    .badge-green  { background:#f0fdf4; color:#16a34a; }
-    .badge-yellow { background:#fefce8; color:#ca8a04; }
-    .badge-red    { background:#fef2f2; color:#dc2626; }
-    .badge-gray   { background:#f3f4f6; color:#6b7280; }
-    .detail-panel { display:none; }
-    .detail-panel.open { display:block; }
+    :root {
+      --bg:            oklch(0.99 0 0);
+      --fg:            oklch(0.15 0 0);
+      --card:          oklch(1    0 0);
+      --primary:       oklch(0.38 0.18 240);
+      --primary-fg:    oklch(0.99 0 0);
+      --muted:         oklch(0.96 0 0);
+      --muted-fg:      oklch(0.50 0 0);
+      --border:        oklch(0.92 0 0);
+      --ring:          oklch(0.70 0 0);
+      --sidebar-bg:    oklch(0.97 0 0);
+      --sidebar-acc:   oklch(0.93 0 0);
+      --accent:        oklch(0.96 0 0);
+      --accent-fg:     oklch(0.18 0 0);
+      --radius:        0.75rem;
+      --shadow-sm:     0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+      --user-bubble:   oklch(0.38 0.18 240);
+      --ai-bubble:     oklch(0.96 0 0);
+    }
+    html.dark {
+      --bg:            oklch(0.12 0 0);
+      --fg:            oklch(0.95 0 0);
+      --card:          oklch(0.15 0 0);
+      --primary:       oklch(0.60 0.15 240);
+      --primary-fg:    oklch(0.12 0 0);
+      --muted:         oklch(0.22 0 0);
+      --muted-fg:      oklch(0.60 0 0);
+      --border:        oklch(0.25 0 0);
+      --ring:          oklch(0.40 0 0);
+      --sidebar-bg:    oklch(0.15 0 0);
+      --sidebar-acc:   oklch(0.22 0 0);
+      --accent:        oklch(0.22 0 0);
+      --accent-fg:     oklch(0.95 0 0);
+      --shadow-sm:     0 1px 3px rgba(0,0,0,.3);
+      --user-bubble:   oklch(0.50 0.15 240);
+      --ai-bubble:     oklch(0.22 0 0);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      font-size: 14px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    button { cursor: pointer; font-family: inherit; border: none; background: none; }
+    input[type="file"] { display: none; }
+    a { text-decoration: none; color: inherit; }
+
+    .app-shell {
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .sidebar {
+      width: 256px;
+      flex-shrink: 0;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      transition: width 0.25s ease, opacity 0.25s ease;
+      overflow: hidden;
+    }
+    .sidebar.collapsed {
+      width: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .btn-new {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--card);
+      color: var(--fg);
+      font-size: 13px;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-new:hover { background: var(--accent); }
+    .btn-new svg { width: 15px; height: 15px; flex-shrink: 0; }
+
+    .btn-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px; height: 34px;
+      border-radius: calc(var(--radius) - 2px);
+      color: var(--muted-fg);
+      transition: background 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-icon:hover { background: var(--accent); color: var(--fg); }
+    .btn-icon svg { width: 16px; height: 16px; }
+
+    .sidebar-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .sidebar-list::-webkit-scrollbar { width: 4px; }
+    .sidebar-list::-webkit-scrollbar-track { background: transparent; }
+    .sidebar-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+    .sidebar-empty {
+      font-size: 12px;
+      color: var(--muted-fg);
+      text-align: center;
+      padding: 20px 8px;
+    }
+
+    .session-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: calc(var(--radius) - 2px);
+      cursor: pointer;
+      transition: background 0.15s;
+      font-size: 13px;
+      color: var(--muted-fg);
+      width: 100%;
+      text-align: left;
+    }
+    .session-item:hover, .session-item.active {
+      background: var(--sidebar-acc);
+      color: var(--fg);
+    }
+    .session-item svg { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.6; }
+    .session-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    .app-header {
+      height: 56px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      flex-shrink: 0;
+      background: var(--bg);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .header-left { display: flex; align-items: center; gap: 10px; }
+    .header-right { display: flex; align-items: center; gap: 6px; }
+
+    .model-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 10px;
+      border-radius: calc(var(--radius) - 2px);
+      color: var(--fg);
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s;
+      position: relative;
+    }
+    .model-btn:hover { background: var(--accent); }
+    .model-btn svg { width: 14px; height: 14px; color: var(--muted-fg); }
+
+    .model-dropdown {
+      position: relative;
+    }
+    .model-menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 220px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-sm), 0 4px 12px rgba(0,0,0,.08);
+      z-index: 100;
+      padding: 4px;
+      overflow: hidden;
+    }
+    .model-menu.open { display: block; }
+    .model-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 10px;
+      border-radius: calc(var(--radius) - 4px);
+      cursor: pointer;
+      transition: background 0.12s;
+      gap: 12px;
+    }
+    .model-option:hover { background: var(--accent); }
+    .model-option.selected { background: var(--accent); }
+    .model-option-name { font-size: 13px; font-weight: 500; color: var(--fg); }
+    .model-option-provider { font-size: 11px; color: var(--muted-fg); }
+
+    .btn-outline {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) - 2px);
+      background: var(--card);
+      color: var(--fg);
+      font-size: 13px;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-outline:hover { background: var(--accent); }
+    .btn-outline svg { width: 14px; height: 14px; }
+    .btn-outline:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-remove-file {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: rgba(239, 68, 68, 0.1);
+      color: #ef4444;
+      border: none;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-remove-file:hover {
+      background: rgba(239, 68, 68, 0.2);
+    }
+    .btn-remove-file svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .success-banner {
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: white;
+      padding: 10px 16px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 500;
+      animation: fadeSlideIn 0.3s ease;
+    }
+
+    .content-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .content-area::-webkit-scrollbar { width: 6px; }
+    .content-area::-webkit-scrollbar-track { background: transparent; }
+    .content-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+    .message {
+      display: flex;
+      gap: 10px;
+      animation: fadeSlideIn 0.3s ease;
+    }
+    @keyframes fadeSlideIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    .message.user {
+      justify-content: flex-end;
+    }
+
+    .message-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .message.user .message-avatar {
+      background: var(--user-bubble);
+      color: white;
+    }
+    .message.ai .message-avatar {
+      background: var(--muted);
+      color: var(--muted-fg);
+    }
+
+    .message-bubble {
+      max-width: 75%;
+      padding: 10px 14px;
+      border-radius: calc(var(--radius) + 4px);
+      position: relative;
+    }
+    .message.user .message-bubble {
+      background: var(--user-bubble);
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+    .message.ai .message-bubble {
+      background: var(--ai-bubble);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+
+    .message-content {
+      font-size: 14px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .message-meta {
+      font-size: 11px;
+      color: var(--muted-fg);
+      margin-top: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .message.user .message-meta {
+      color: rgba(255,255,255,0.7);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 10px;
+      font-weight: 500;
+      padding: 1px 6px;
+      border-radius: 99px;
+      background: oklch(0.93 0.04 240);
+      color: oklch(0.42 0.18 240);
+      margin-top: 6px;
+      display: inline-block;
+    }
+    html.dark .pill {
+      background: oklch(0.22 0.06 240);
+      color: oklch(0.72 0.15 240);
+    }
+
+    .thinking-dots {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      padding: 10px 14px;
+      background: var(--ai-bubble);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 4px);
+      border-bottom-left-radius: 4px;
+    }
+    .thinking-dots.hidden { display: none; }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted-fg);
+      opacity: 0.4;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse {
+      0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+      40% { opacity: 1; transform: scale(1); }
+    }
+
+    .input-bar {
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+      padding: 12px 16px;
+      flex-shrink: 0;
+      position: sticky;
+      bottom: 0;
+      z-index: 10;
+      box-shadow: 0 -2px 10px rgba(0,0,0,0.05);
+    }
+    .input-box {
+      max-width: 720px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 8px);
+      background: var(--card);
+      padding: 4px 4px 4px 12px;
+      box-shadow: var(--shadow-sm);
+      transition: box-shadow 0.15s;
+    }
+    .input-box:focus-within {
+      box-shadow: 0 0 0 2px var(--ring);
+    }
+
+    .mode-switch {
+      display: flex;
+      background: var(--muted);
+      border-radius: calc(var(--radius) - 2px);
+      padding: 2px;
+      flex-shrink: 0;
+    }
+    .mode-btn {
+      padding: 6px;
+      border-radius: calc(var(--radius) - 4px);
+      color: var(--muted-fg);
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .mode-btn svg {
+      width: 18px;
+      height: 18px;
+    }
+    .mode-btn.active {
+      background: var(--card);
+      color: var(--fg);
+      box-shadow: 0 1px 2px rgba(0,0,0,.06);
+    }
+
+    .btn-attach {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px; height: 34px;
+      border-radius: calc(var(--radius) - 2px);
+      color: var(--muted-fg);
+      transition: background 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-attach:hover { background: var(--accent); color: var(--fg); }
+    .btn-attach svg { width: 18px; height: 18px; }
+
+    .text-input-wrap {
+      flex: 1;
+      position: relative;
+      min-width: 0;
+    }
+    .text-input {
+      width: 100%;
+      border: none;
+      background: transparent;
+      font-size: 14px;
+      color: var(--fg);
+      outline: none;
+      padding: 8px 0;
+      font-family: inherit;
+    }
+    .text-input::placeholder {
+      color: var(--muted-fg);
+    }
+
+    .file-display {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      font-size: 13px;
+    }
+    .file-name {
+      color: var(--fg);
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-placeholder { color: var(--muted-fg); }
+    .file-tag {
+      flex-shrink: 0;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 6px;
+      background: var(--muted);
+      border-radius: 4px;
+      color: var(--muted-fg);
+    }
+
+    .skip-toggle {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      color: var(--muted-fg);
+      cursor: pointer;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .skip-toggle input[type="checkbox"] {
+      display: revert;
+      width: 14px;
+      height: 14px;
+      accent-color: var(--primary);
+    }
+
+    .separator { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
+
+    .btn-send {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px; height: 36px;
+      border-radius: calc(var(--radius));
+      background: var(--primary);
+      color: var(--primary-fg);
+      flex-shrink: 0;
+      transition: opacity 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-send:disabled { opacity: 0.35; cursor: not-allowed; }
+    .btn-send:not(:disabled):hover { opacity: 0.85; }
+    .btn-send svg { width: 16px; height: 16px; }
+
+    .input-hint {
+      max-width: 720px;
+      margin: 6px auto 0;
+      font-size: 11px;
+      color: var(--muted-fg);
+      text-align: center;
+    }
+
+    .app-shell.drag-over .input-box {
+      box-shadow: 0 0 0 2px oklch(0.55 0.18 240);
+      border-color: oklch(0.55 0.18 240);
+    }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+    .hidden { display: none !important; }
+
+    .error-banner {
+      background: oklch(0.97 0.01 15);
+      border: 1px solid oklch(0.88 0.05 15);
+      color: oklch(0.48 0.2 15);
+      border-radius: calc(var(--radius) - 2px);
+      padding: 10px 14px;
+      font-size: 13px;
+      margin-bottom: 12px;
+      animation: fadeSlideIn 0.3s ease;
+    }
+    html.dark .error-banner {
+      background: oklch(0.18 0.04 15);
+      border-color: oklch(0.28 0.06 15);
+      color: oklch(0.68 0.22 15);
+    }
+
+    .welcome-message {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--muted-fg);
+    }
+    .welcome-message h2 {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--fg);
+      margin-bottom: 8px;
+    }
+    .welcome-message p {
+      font-size: 13px;
+      max-width: 400px;
+      margin: 0 auto;
+    }
+    .welcome-message .feature-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: center;
+      margin-top: 16px;
+    }
+    .badge {
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 99px;
+      background: var(--muted);
+      color: var(--muted-fg);
+      border: 1px solid var(--border);
+    }
   </style>
 </head>
-<body class="bg-gray-50 min-h-screen">
+<body>
 
-<div class="max-w-4xl mx-auto px-4 py-10">
-  <!-- Header -->
-  <div class="mb-8 text-center">
-    <h1 class="text-3xl font-bold text-gray-800">工时拆解 Agent</h1>
-    <p class="text-gray-500 mt-2">上传 Excel → AI 重建功能点 → 工时评估 → 评审 → 下载结果</p>
-    <div class="flex justify-center gap-2 mt-3 flex-wrap">
-      <span class="badge badge-blue">功能点重建</span>
-      <span class="badge badge-green">工时评估</span>
-      <span class="badge badge-yellow">需求评审</span>
-      <span class="badge badge-gray">知识库驱动</span>
-    </div>
-  </div>
-
-  <!-- Step 1: 上传 -->
-  <div class="bg-white rounded-2xl shadow-sm p-6 mb-5" id="section-upload">
-    <h2 class="font-semibold text-gray-700 mb-4">Step 1 · 上传 Excel 文件</h2>
-    <div id="drop-zone"
-         class="border-2 border-dashed border-gray-300 rounded-xl p-12 text-center cursor-pointer hover:border-blue-400 transition-colors"
-         onclick="document.getElementById('file-input').click()">
-      <svg class="mx-auto h-12 w-12 text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
-      </svg>
-      <p class="text-gray-500">拖拽或点击选择 <span class="text-blue-500 font-medium">.xlsx</span> 文件</p>
-      <p class="text-xs text-gray-400 mt-1">最大 10MB</p>
-      <input type="file" id="file-input" accept=".xlsx" class="hidden">
-    </div>
-    <div id="upload-info" class="hidden mt-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-700 flex items-center gap-2">
-      <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-      </svg>
-      <span id="upload-info-text"></span>
-    </div>
-  </div>
-
-  <!-- Step 2: 配置 -->
-  <div class="bg-white rounded-2xl shadow-sm p-6 mb-5 hidden" id="section-config">
-    <h2 class="font-semibold text-gray-700 mb-4">Step 2 · 配置参数</h2>
-    <div class="grid grid-cols-1 gap-4">
-      <div>
-        <label class="block text-sm text-gray-600 mb-1">选择模型</label>
-        <select id="model-select"
-                class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white">
-          <option value="">加载中...</option>
-        </select>
-      </div>
-      <div class="flex items-center gap-3">
-        <input id="skip-filled" type="checkbox" checked class="w-4 h-4 rounded text-blue-500">
-        <label for="skip-filled" class="text-sm text-gray-600">跳过 G 列已有内容的行（不重复生成）</label>
-      </div>
-    </div>
-  </div>
-
-  <!-- Step 3: 需求预览 -->
-  <div class="bg-white rounded-2xl shadow-sm p-6 mb-5 hidden" id="section-preview">
-    <div class="flex items-center justify-between mb-4">
-      <h2 class="font-semibold text-gray-700">Step 3 · 需求预览</h2>
-      <span id="row-count" class="text-sm text-gray-400"></span>
-    </div>
-    <div class="overflow-x-auto">
-      <table class="w-full text-sm">
-        <thead>
-          <tr class="text-left text-gray-400 border-b">
-            <th class="pb-2 pr-4">行号</th>
-            <th class="pb-2 pr-4">功能模块</th>
-            <th class="pb-2 pr-4">需求名称</th>
-            <th class="pb-2 pr-4">描述摘要</th>
-            <th class="pb-2">状态</th>
-          </tr>
-        </thead>
-        <tbody id="preview-tbody" class="divide-y divide-gray-50"></tbody>
-      </table>
-    </div>
-    <div class="mt-5 text-right">
-      <button id="btn-start"
-              class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2.5 rounded-xl font-medium transition-colors">
-        开始生成
+<div class="app-shell" id="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <button class="btn-new" id="btn-new">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+        </svg>
+        新建对话
+      </button>
+      <button class="btn-icon" id="btn-close-sidebar" title="折叠侧边栏">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7M18 19l-7-7 7-7"/>
+        </svg>
       </button>
     </div>
-  </div>
+    <div class="sidebar-list" id="sidebar-list">
+      <p class="sidebar-empty">暂无对话记录</p>
+    </div>
+  </aside>
 
-  <!-- Step 4: 进度 -->
-  <div class="bg-white rounded-2xl shadow-sm p-6 mb-5 hidden" id="section-progress">
-    <h2 class="font-semibold text-gray-700 mb-4">Step 4 · 处理进度</h2>
-    <div class="flex items-center gap-3 mb-2">
-      <div class="flex-1 bg-gray-100 rounded-full h-2.5">
-        <div id="progress-bar" class="bg-blue-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div>
+  <div class="main">
+    <header class="app-header">
+      <div class="header-left">
+        <button class="btn-icon hidden" id="btn-open-sidebar" title="展开侧边栏">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M6 5l7 7-7 7"/>
+          </svg>
+        </button>
+        <div class="model-dropdown" id="model-dropdown">
+          <button class="model-btn" id="model-btn">
+            <span id="model-label">加载中...</span>
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+            </svg>
+          </button>
+          <div class="model-menu" id="model-menu"></div>
+        </div>
       </div>
-      <span id="progress-text" class="text-sm text-gray-500 whitespace-nowrap">0 / 0</span>
-    </div>
-    <p id="progress-status" class="text-xs text-gray-400 mb-4"></p>
-    <div id="live-results" class="space-y-2 max-h-80 overflow-y-auto"></div>
-  </div>
+      <div class="header-right">
+        <a id="btn-download-header" class="btn-outline hidden" href="#" download>
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>
+          下载结果
+        </a>
+        <button id="btn-export-eval" class="btn-outline hidden" onclick="exportEvaluation()">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+          导出评估
+        </button>
+        <button class="btn-icon" id="btn-theme" title="切换主题">
+          <svg id="icon-moon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+          </svg>
+          <svg id="icon-sun" class="hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707M17.657 17.657l-.707-.707M6.343 6.343l-.707-.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
 
-  <!-- Step 5: 下载 -->
-  <div class="hidden text-center" id="section-download">
-    <div class="bg-green-50 border border-green-200 rounded-2xl p-8">
-      <svg class="mx-auto h-12 w-12 text-green-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-      </svg>
-      <p class="text-green-700 font-semibold text-lg mb-2">处理完成！</p>
-      <p class="text-sm text-gray-500 mb-4">
-        已回填：G列（页面×功能点拆解 + 产品工时）· N列（工时天数，可求和）
-      </p>
-      <a id="download-btn" href="#"
-         class="inline-block bg-green-500 hover:bg-green-600 text-white px-8 py-3 rounded-xl font-medium transition-colors">
-        下载结果 Excel
-      </a>
-      <p class="text-xs text-gray-400 mt-4">
-        <button onclick="location.reload()" class="underline hover:text-gray-600">处理新文件</button>
-      </p>
+    <div class="content-area" id="content-area">
+      <div class="welcome-message" id="welcome-message">
+        <h2>有什么需要拆解的？</h2>
+        <p>上传 Excel 文件或直接输入需求，AI 自动重建功能点、估算产品工时</p>
+        <div class="feature-badges">
+          <span class="badge">功能点重建</span>
+          <span class="badge">页面×功能点结构</span>
+          <span class="badge">工时估算</span>
+          <span class="badge">知识库驱动</span>
+        </div>
+      </div>
+
+      <div id="messages-container"></div>
+
+      <div class="thinking-dots hidden" id="thinking-dots">
+        <div class="dot"></div>
+        <div class="dot"></div>
+        <div class="dot"></div>
+      </div>
+    </div>
+
+    <div class="input-bar">
+      <div class="input-box" id="input-box">
+        <!-- 文件上传按钮 -->
+        <button class="btn-attach" id="btn-attach" title="上传 Excel 文件">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+          </svg>
+        </button>
+        <input type="file" id="file-input" accept=".xlsx">
+
+        <!-- 文本输入框 -->
+        <div class="text-input-wrap">
+          <input type="text" class="text-input" id="text-input" placeholder="输入需求描述，或上传 Excel 文件批量处理...">
+        </div>
+
+        <!-- 已上传文件显示 -->
+        <div class="file-display hidden" id="file-display">
+          <span class="file-name" id="file-name"></span>
+          <span class="file-tag" id="file-tag"></span>
+          <button class="btn-remove-file" id="btn-remove-file" onclick="clearFileDisplay()">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- 跳过已填写选项（仅文件模式显示） -->
+        <label class="skip-toggle hidden" id="skip-label">
+          <input type="checkbox" id="skip-filled" checked>
+          跳过已填写
+        </label>
+
+        <!-- 发送按钮 -->
+        <button class="btn-send" id="btn-send" disabled title="发送">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+          </svg>
+        </button>
+      </div>
+      <p class="input-hint" id="input-hint">输入需求或上传 Excel 文件，AI 自动分析并评估工时</p>
     </div>
   </div>
-
-  <!-- 错误提示 -->
-  <div id="error-banner" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm"></div>
 </div>
 
 <script>
   let fileId = null;
+  let selectedModel = '';
+  let sessions = JSON.parse(localStorage.getItem('wt_sessions') || '[]');
+  let isDark = localStorage.getItem('wt_dark') === '1';
+  let processingFile = false;
+  
+  // 会话管理
+  let currentSessionId = localStorage.getItem('wt_session_id') || null;
+  let chatHistory = [];
+  
+  // 评估结果缓存（用于导出）
+  let lastEvaluationResult = null;
 
-  // ---- 加载模型列表 ----
+  if (isDark) document.documentElement.classList.add('dark');
+
+  document.getElementById('btn-theme').addEventListener('click', () => {
+    isDark = !isDark;
+    document.documentElement.classList.toggle('dark', isDark);
+    localStorage.setItem('wt_dark', isDark ? '1' : '0');
+    document.getElementById('icon-moon').classList.toggle('hidden', isDark);
+    document.getElementById('icon-sun').classList.toggle('hidden', !isDark);
+  });
+  document.getElementById('icon-moon').classList.toggle('hidden', isDark);
+  document.getElementById('icon-sun').classList.toggle('hidden', !isDark);
+
+  document.getElementById('btn-close-sidebar').addEventListener('click', () => setSidebar(false));
+  document.getElementById('btn-open-sidebar').addEventListener('click', () => setSidebar(true));
+
+  function setSidebar(open) {
+    document.getElementById('sidebar').classList.toggle('collapsed', !open);
+    document.getElementById('btn-open-sidebar').classList.toggle('hidden', open);
+  }
+
+  document.getElementById('btn-new').addEventListener('click', resetAll);
+
+  function renderSidebar() {
+    const list = document.getElementById('sidebar-list');
+    if (sessions.length === 0) {
+      list.innerHTML = '<p class="sidebar-empty">暂无对话记录</p>';
+      return;
+    }
+    list.innerHTML = sessions.map((s, i) => `
+      <button class="session-item${i === 0 ? ' active' : ''}" title="${esc(s.filename)}">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414A1 1 0 0119 9.414V19a2 2 0 01-2 2z"/>
+        </svg>
+        <span>${esc(s.filename)}</span>
+      </button>
+    `).join('');
+  }
+  renderSidebar();
+
+  function addSession(filename, rows) {
+    sessions.unshift({ filename, rows, time: Date.now() });
+    if (sessions.length > 20) sessions.pop();
+    localStorage.setItem('wt_sessions', JSON.stringify(sessions));
+    renderSidebar();
+  }
+
   (async () => {
     try {
       const resp = await fetch('/models');
       const data = await resp.json();
-      const sel = document.getElementById('model-select');
-      sel.innerHTML = data.models.map(m =>
-        `<option value="${m.id}" ${m.id === data.default ? 'selected' : ''}>${m.label}</option>`
-      ).join('');
+      selectedModel = data.default;
+      const menu = document.getElementById('model-menu');
+      menu.innerHTML = data.models.map(m => `
+        <div class="model-option${m.id === data.default ? ' selected' : ''}"
+             data-id="${esc(m.id)}" onclick="selectModel('${esc(m.id)}', '${esc(m.label)}', this)">
+          <span class="model-option-name">${esc(m.label.split('（')[0])}</span>
+          <span class="model-option-provider">${esc(m.label.match(/（(.+?)）/)?.[1] || '')}</span>
+        </div>
+      `).join('');
+      const first = data.models.find(m => m.id === data.default) || data.models[0];
+      if (first) document.getElementById('model-label').textContent = first.label.split('（')[0];
     } catch (e) {
-      document.getElementById('model-select').innerHTML = '<option value="">加载失败</option>';
+      document.getElementById('model-label').textContent = '模型';
     }
   })();
 
-  // ---- 拖拽上传 ----
-  const dropZone = document.getElementById('drop-zone');
-  const fileInput = document.getElementById('file-input');
+  function selectModel(id, label, el) {
+    selectedModel = id;
+    document.getElementById('model-label').textContent = label.split('（')[0];
+    document.querySelectorAll('.model-option').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    closeModelMenu();
+  }
 
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-  dropZone.addEventListener('drop', e => {
+  document.getElementById('model-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('model-menu').classList.toggle('open');
+  });
+  document.addEventListener('click', closeModelMenu);
+  function closeModelMenu() {
+    document.getElementById('model-menu').classList.remove('open');
+  }
+
+  document.getElementById('text-input').addEventListener('input', (e) => {
+    const text = e.target.value.trim();
+    document.getElementById('btn-send').disabled = !text || processingFile;
+  });
+
+  document.getElementById('text-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      startProcess();
+    }
+  });
+
+  document.getElementById('btn-attach').addEventListener('click', () => {
+    document.getElementById('file-input').click();
+  });
+  document.getElementById('file-input').addEventListener('change', (e) => {
+    if (e.target.files[0]) handleFile(e.target.files[0]);
+  });
+
+  const shell = document.getElementById('app-shell');
+  shell.addEventListener('dragover', (e) => { e.preventDefault(); shell.classList.add('drag-over'); });
+  shell.addEventListener('dragleave', (e) => {
+    if (!shell.contains(e.relatedTarget)) shell.classList.remove('drag-over');
+  });
+  shell.addEventListener('drop', (e) => {
     e.preventDefault();
-    dropZone.classList.remove('drag-over');
+    shell.classList.remove('drag-over');
     const file = e.dataTransfer.files[0];
     if (file) handleFile(file);
-  });
-  fileInput.addEventListener('change', () => {
-    if (fileInput.files[0]) handleFile(fileInput.files[0]);
   });
 
   async function handleFile(file) {
@@ -183,156 +878,421 @@
     if (file.size > 10 * 1024 * 1024) { showError('文件超过 10MB 限制'); return; }
 
     clearError();
-    const infoEl = document.getElementById('upload-info');
-    const infoText = document.getElementById('upload-info-text');
-    infoEl.classList.remove('hidden');
-    infoText.textContent = '上传中...';
+    setFileDisplay(file.name, '上传中...');
+    document.getElementById('btn-send').disabled = true;
 
-    const formData = new FormData();
-    formData.append('file', file);
+    const fd = new FormData();
+    fd.append('file', file);
 
     try {
-      const resp = await fetch('/upload', { method: 'POST', body: formData });
+      const resp = await fetch('/upload', { method: 'POST', body: fd });
       const data = await resp.json();
-      if (data.error) { showError(data.error); infoEl.classList.add('hidden'); return; }
+      if (data.error) { showError(data.error); clearFileDisplay(); return; }
 
       fileId = data.file_id;
-      infoText.textContent = `已解析 ${data.total} 行需求 · ${data.filename}`;
+      setFileDisplay(data.filename, `${data.total} 行需求`);
+      document.getElementById('btn-send').disabled = false;
 
-      // 渲染预览表格
-      renderPreview(data.rows);
-      show('section-config');
-      show('section-preview');
+      addSession(data.filename, data.total);
     } catch (e) {
       showError('上传失败：' + e.message);
-      infoEl.classList.add('hidden');
+      clearFileDisplay();
     }
   }
 
-  function renderPreview(rows) {
-    document.getElementById('row-count').textContent = `共 ${rows.length} 行`;
-    const tbody = document.getElementById('preview-tbody');
-    tbody.innerHTML = rows.map(r => `
-      <tr class="hover:bg-gray-50">
-        <td class="py-2 pr-4 text-gray-400">${r.row}</td>
-        <td class="py-2 pr-4 text-gray-600 max-w-[100px] truncate">${esc(r.module)}</td>
-        <td class="py-2 pr-4 font-medium text-gray-700 max-w-[140px] truncate">${esc(r.feature)}</td>
-        <td class="py-2 pr-4 text-gray-500 max-w-[180px] truncate">${esc(r.detail)}</td>
-        <td class="py-2">
-          ${r.has_g
-            ? '<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">已填写</span>'
-            : '<span class="text-xs bg-blue-50 text-blue-500 px-2 py-0.5 rounded">待生成</span>'}
-        </td>
-      </tr>
-    `).join('');
-  }
+  document.getElementById('btn-send').addEventListener('click', startProcess);
 
-  // ---- 开始处理 ----
-  document.getElementById('btn-start').addEventListener('click', async () => {
-    if (!fileId) return;
+  async function startProcess() {
     clearError();
+    processingFile = true;
+    document.getElementById('btn-send').disabled = true;
 
-    const modelId = document.getElementById('model-select').value;
-    const skipFilled = document.getElementById('skip-filled').checked;
-
-    document.getElementById('btn-start').disabled = true;
-    document.getElementById('btn-start').textContent = '处理中...';
-
-    show('section-progress');
-
-    try {
-      const resp = await fetch('/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_id: fileId, model_id: modelId, skip_filled: skipFilled }),
-      });
-      const data = await resp.json();
-      if (data.error) { showError(data.error); return; }
-
-      listenProgress(data.task_id);
-    } catch (e) {
-      showError('启动失败：' + e.message);
+    const messagesContainer = document.getElementById('messages-container');
+    const welcomeMessage = document.getElementById('welcome-message');
+    if (welcomeMessage) {
+      welcomeMessage.remove();
     }
-  });
 
-  function listenProgress(taskId) {
+    const text = document.getElementById('text-input').value.trim();
+    
+    // 判断是文件模式还是文本模式
+    const isFileMode = fileId !== null;
+    
+    if (isFileMode) {
+      // 文件模式
+      const filename = document.getElementById('file-name').textContent;
+      addMessage('user', `已上传文件：${filename}`);
+    } else if (text) {
+      // 文本模式
+      addMessage('user', text);
+      document.getElementById('text-input').value = '';
+    } else {
+      processingFile = false;
+      document.getElementById('btn-send').disabled = false;
+      return;
+    }
+
+    showThinking();
+    scrollBottom();
+
+    if (isFileMode) {
+      // 文件处理流程
+      const skipFilled = document.getElementById('skip-filled').checked;
+      try {
+        const resp = await fetch('/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            file_id: fileId, 
+            model_id: selectedModel, 
+            skip_filled: skipFilled
+          }),
+        });
+        const data = await resp.json();
+        if (data.error) { showError(data.error); hideThinking(); processingFile = false; return; }
+        listenProgress(data.task_id, true);
+      } catch (e) {
+        showError('启动失败：' + e.message);
+        hideThinking();
+        processingFile = false;
+      }
+    } else {
+      // 文本处理流程（智能评估）
+      const messageText = document.querySelector('.message.user:last-child .message-content').textContent;
+      try {
+        const resp = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            session_id: currentSessionId,
+            message: messageText, 
+            model_id: selectedModel
+          }),
+        });
+        const data = await resp.json();
+        hideThinking();
+        processingFile = false;
+        
+        if (data.error) { 
+          showError(data.error); 
+          addMessage('ai', `❌ 处理失败：${data.error}`);
+          scrollBottom();
+          document.getElementById('btn-send').disabled = false;
+          return; 
+        }
+        
+        // 更新会话ID
+        currentSessionId = data.session_id;
+        localStorage.setItem('wt_session_id', currentSessionId);
+        
+        // 缓存评估结果用于导出（如果有评估结果）
+        if (data.evaluation) {
+          lastEvaluationResult = {
+            results: [{
+              original_requirement: {
+                module: '',
+                feature: text.split('\n')[0] || text,
+                detail: text
+              },
+              analysis: data.analysis,
+              decomposition: data.decomposition,
+              evaluation: data.evaluation,
+            }],
+            total_days: data.evaluation.effort_days,
+            requirement_count: 1,
+          };
+          document.getElementById('btn-export-eval').classList.remove('hidden');
+          addMessage('ai', formatEvaluationResult(data));
+        } else {
+          listenProgress(data.task_id, false, true);
+        }
+      } catch (e) {
+        showError('启动失败：' + e.message);
+        hideThinking();
+        processingFile = false;
+      }
+    }
+  }
+
+  function formatEvaluationResult(data) {
+    let result = `【需求分析】\n`;
+    result += `类型: ${data.analysis.judgment || '未知'}（置信度: ${Math.round((data.analysis.confidence || 0) * 100)}%）\n\n`;
+    
+    if (data.analysis.related_modules && data.analysis.related_modules.length > 0) {
+      result += `相关模块: ${data.analysis.related_modules.join(', ')}\n`;
+    }
+    if (data.analysis.existing_features && data.analysis.existing_features.length > 0) {
+      result += `相似功能: ${data.analysis.existing_features.join(', ')}\n`;
+    }
+    
+    result += `\n【初步拆解】\n`;
+    data.decomposition.forEach(part => {
+      result += `【${part.type}】${part.name}\n`;
+      part.features.forEach(feat => {
+        result += `  - ${feat}\n`;
+      });
+    });
+    
+    result += `\n【工时评估】\n`;
+    result += `模型: ${data.evaluation.model || '综合评估'}\n`;
+    result += `预估工时: ${data.evaluation.effort_days || 0} 天\n`;
+    
+    if (data.analysis.suggestions && data.analysis.suggestions.length > 0) {
+      result += `\n【建议】\n`;
+      data.analysis.suggestions.forEach(suggestion => {
+        result += `• ${suggestion}\n`;
+      });
+    }
+    
+    return result;
+  }
+
+  function addMessage(role, content, meta = '') {
+    const container = document.getElementById('messages-container');
+    const message = document.createElement('div');
+    message.className = `message ${role}`;
+    message.innerHTML = `
+      <div class="message-avatar">${role === 'user' ? '我' : 'AI'}</div>
+      <div class="message-bubble">
+        <div class="message-content">${esc(content)}</div>
+        ${meta ? `<div class="message-meta">${meta}</div>` : ''}
+      </div>
+    `;
+    container.appendChild(message);
+  }
+
+  function addResultMessage(g_text, total_days, page_count) {
+    let content = g_text;
+    if (total_days || page_count) {
+      content += '\n\n';
+      if (page_count) content += `📄 页面数：${page_count}\n`;
+      if (total_days) content += `⏱️ 工时估算：${total_days} 天`;
+    }
+    addMessage('ai', content);
+  }
+
+  function showThinking() {
+    document.getElementById('thinking-dots').classList.remove('hidden');
+  }
+
+  function hideThinking() {
+    document.getElementById('thinking-dots').classList.add('hidden');
+  }
+
+  function listenProgress(taskId, isFileMode, isChatMode = false) {
     const es = new EventSource(`/progress/${taskId}`);
-    const bar = document.getElementById('progress-bar');
-    const progressText = document.getElementById('progress-text');
-    const statusEl = document.getElementById('progress-status');
-    const resultsEl = document.getElementById('live-results');
 
     es.onmessage = (e) => {
       const msg = JSON.parse(e.data);
 
       if (msg.done) {
         es.close();
-        bar.style.width = '100%';
-        progressText.textContent = '完成';
-        show('section-download');
-        document.getElementById('download-btn').href = `/download/${encodeURIComponent(msg.filename)}`;
-        document.getElementById('download-btn').download = msg.filename;
+        hideThinking();
+        processingFile = false;
+
+        // 更新会话ID（如果来自聊天接口）
+        if (msg.session_id) {
+          currentSessionId = msg.session_id;
+          localStorage.setItem('wt_session_id', currentSessionId);
+        }
+
+        if (isFileMode) {
+          addResultMessage(`处理完成！已成功拆解并估算工时。\n\n📥 点击下载结果文件：`, '', '');
+          const url = `/download/${encodeURIComponent(msg.filename)}`;
+          document.getElementById('btn-download-header').href = url;
+          document.getElementById('btn-download-header').download = msg.filename;
+          document.getElementById('btn-download-header').classList.remove('hidden');
+
+          const lastMsg = document.querySelector('.message.ai:last-child .message-bubble');
+          if (lastMsg) {
+            lastMsg.innerHTML += `
+              <div style="margin-top: 10px;">
+                <a href="${url}" download="${msg.filename}" 
+                   style="display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--user-bubble); color: white; border-radius: 8px; text-decoration: none; font-size: 13px; font-weight: 500;">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                  </svg>
+                  下载 Excel
+                </a>
+              </div>
+            `;
+          }
+        } else {
+          addResultMessage(msg.g_text, msg.total_days, msg.page_count);
+          
+          // 添加到聊天历史
+          chatHistory.push({ 
+            role: 'assistant', 
+            content: msg.g_text,
+            total_days: msg.total_days,
+            page_count: msg.page_count 
+          });
+        }
+
+        scrollBottom();
+        document.getElementById('btn-send').disabled = false;
         return;
       }
 
       if (msg.error) {
         es.close();
+        hideThinking();
+        processingFile = false;
         showError('处理出错：' + msg.error);
+        addMessage('ai', `❌ 处理出错：${msg.error}`);
+        scrollBottom();
+        document.getElementById('btn-send').disabled = false;
         return;
       }
 
-      // 更新进度
-      const pct = Math.round((msg.current / msg.total) * 100);
-      bar.style.width = pct + '%';
-      progressText.textContent = `${msg.current} / ${msg.total}`;
-      statusEl.textContent = `正在处理第 ${msg.row} 行...`;
-
-      // 实时结果卡片
-      const statusClass = msg.status === 'done' ? 'status-done' : msg.status === 'skipped' ? 'status-skip' : 'status-error';
-      const icon = msg.status === 'done' ? '✓' : msg.status === 'skipped' ? '⊘' : '✗';
-
-      let pageBadge = '';
-      if (msg.page_count > 0) {
-        pageBadge = `<span class="badge badge-blue ml-1">${msg.page_count}个页面</span>`;
+      if (!isFileMode && msg.preview) {
+        const lastAiMsg = document.querySelector('.message.ai:last-child');
+        if (!lastAiMsg) {
+          addMessage('ai', msg.preview);
+        }
       }
 
-      const card = document.createElement('div');
-      card.className = 'result-card bg-gray-50 rounded-lg px-3 py-2 text-sm';
-      card.innerHTML = `
-        <div class="flex items-start gap-2">
-          <span class="${statusClass} font-bold mt-0.5 shrink-0">${icon}</span>
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center flex-wrap gap-1">
-              <span class="text-gray-400 text-xs">行 ${msg.row}</span>
-              ${pageBadge}
-            </div>
-            <p class="text-gray-600 mt-0.5 truncate">${esc(msg.preview || '')}</p>
-          </div>
-        </div>
-      `;
-      resultsEl.appendChild(card);
-      resultsEl.scrollTop = resultsEl.scrollHeight;
+      scrollBottom();
     };
 
     es.onerror = () => {
       es.close();
-      showError('连接中断，请刷新页面重试');
+      hideThinking();
+      processingFile = false;
+      showError('连接中断，请刷新重试');
+      document.getElementById('btn-send').disabled = false;
     };
   }
 
-  // ---- 工具函数 ----
-  function show(id) { document.getElementById(id).classList.remove('hidden'); }
-  function esc(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  function resetAll() {
+    fileId = null;
+    clearError();
+    clearFileDisplay();
+    processingFile = false;
+    document.getElementById('btn-send').disabled = true;
+    document.getElementById('btn-attach').disabled = false;
+    document.getElementById('messages-container').innerHTML = '';
+    document.getElementById('btn-download-header').classList.add('hidden');
+    document.getElementById('btn-export-eval').classList.add('hidden');
+    document.getElementById('text-input').value = '';
+    
+    // 重置会话状态
+    currentSessionId = null;
+    chatHistory = [];
+    lastEvaluationResult = null;
+    localStorage.removeItem('wt_session_id');
+
+    const container = document.getElementById('content-area');
+    const existingWelcomeMsg = document.getElementById('welcome-message');
+    if (existingWelcomeMsg) {
+      existingWelcomeMsg.remove();
+    }
+    const welcomeMsg = document.createElement('div');
+    welcomeMsg.className = 'welcome-message';
+    welcomeMsg.id = 'welcome-message';
+    welcomeMsg.innerHTML = `
+      <h2>有什么需要拆解的？</h2>
+      <p>输入需求描述或上传 Excel 文件，AI 自动分析并评估工时</p>
+      <div class="feature-badges">
+        <span class="badge">需求分析</span>
+        <span class="badge">智能拆解</span>
+        <span class="badge">工时估算</span>
+        <span class="badge">知识库驱动</span>
+        <span class="badge">综合评估</span>
+      </div>
+    `;
+    container.insertBefore(welcomeMsg, document.getElementById('messages-container'));
+    scrollTop();
   }
+
+  // 导出评估结果
+  async function exportEvaluation() {
+    if (!lastEvaluationResult) {
+      showError('没有可导出的评估结果');
+      return;
+    }
+
+    try {
+      const resp = await fetch('/export_evaluation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ results: lastEvaluationResult }),
+      });
+      const data = await resp.json();
+      
+      if (data.error) {
+        showError('导出失败：' + data.error);
+        return;
+      }
+      
+      // 下载文件
+      const link = document.createElement('a');
+      link.href = data.download_url;
+      link.download = data.filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      showSuccess('导出成功！');
+    } catch (e) {
+      showError('导出失败：' + e.message);
+    }
+  }
+
+  function showSuccess(msg) {
+    const container = document.getElementById('content-area');
+    const banner = document.createElement('div');
+    banner.className = 'success-banner';
+    banner.textContent = msg;
+    container.insertBefore(banner, container.firstChild);
+    setTimeout(() => banner.remove(), 3000);
+  }
+
   function showError(msg) {
-    const el = document.getElementById('error-banner');
-    el.textContent = msg;
-    el.classList.remove('hidden');
-    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const container = document.getElementById('content-area');
+    const banner = document.createElement('div');
+    banner.className = 'error-banner';
+    banner.textContent = msg;
+    container.insertBefore(banner, container.firstChild);
+    setTimeout(() => banner.remove(), 5000);
   }
+
   function clearError() {
-    document.getElementById('error-banner').classList.add('hidden');
+    document.querySelectorAll('.error-banner').forEach(el => el.remove());
+  }
+
+  function setFileDisplay(name, tagText) {
+    document.getElementById('file-display').classList.remove('hidden');
+    document.getElementById('text-input').classList.add('hidden');
+    document.getElementById('file-name').textContent = name;
+    document.getElementById('file-tag').textContent = tagText;
+    document.getElementById('skip-label').classList.remove('hidden');
+  }
+
+  function clearFileDisplay() {
+    document.getElementById('file-display').classList.add('hidden');
+    document.getElementById('text-input').classList.remove('hidden');
+    document.getElementById('file-name').textContent = '';
+    document.getElementById('file-tag').textContent = '';
+    document.getElementById('skip-label').classList.add('hidden');
+    fileId = null;
+  }
+
+  function scrollBottom() {
+    const area = document.getElementById('content-area');
+    setTimeout(() => area.scrollTo({ top: area.scrollHeight, behavior: 'smooth' }), 50);
+  }
+
+  function scrollTop() {
+    document.getElementById('content-area').scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 </script>
 </body>

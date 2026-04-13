@@ -5,11 +5,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================
-# 后台 API Key 配置（用户不可见，在此处填写）
+# 后台 API Key 配置（用户不可见，通过环境变量或 .env 文件设置）
 # ============================================================
 API_KEYS = {
-    "dashscope": os.environ.get("DASHSCOPE_API_KEY", "sk-f448e9a456f849b984fac86018b92e48"),
-    "gemini":    os.environ.get("GEMINI_API_KEY",    "AIzaSyAWTJZRLWhfoKqnSOQXkDttnN3u6HsEQn0"),
+    "dashscope": os.environ.get("DASHSCOPE_API_KEY", ""),
+    "gemini":    os.environ.get("GEMINI_API_KEY",    ""),
 }
 
 # ============================================================

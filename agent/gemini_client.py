@@ -2,8 +2,11 @@
 import json
 import re
 import time
+import logging
 from openai import OpenAI
 from config import AVAILABLE_MODELS, API_KEYS, DEFAULT_MODEL, MAX_RETRIES
+
+logger = logging.getLogger(__name__)
 
 
 def _get_model_config(model_id: str) -> dict:
@@ -20,24 +23,36 @@ def call_llm(prompt: str, model_id: str = None) -> str:
 
     api_key = API_KEYS.get(cfg["provider"], "")
     if not api_key:
-        raise RuntimeError(f"未配置 {cfg['provider']} 的 API Key，请在 config.py 中填写")
+        raise RuntimeError(f"未配置 {cfg['provider']} 的 API Key，请在 .env 文件中设置")
 
-    client = OpenAI(api_key=api_key, base_url=cfg["base_url"])
+    client = OpenAI(
+        api_key=api_key,
+        base_url=cfg["base_url"],
+        timeout=60,  # 60秒超时
+        max_retries=0  # 由外层处理重试
+    )
     last_exc = None
 
     for attempt in range(MAX_RETRIES):
         try:
+            logger.debug(f"LLM 请求: model={model_id}, attempt={attempt+1}/{MAX_RETRIES}, prompt_length={len(prompt)}")
             response = client.chat.completions.create(
                 model=model_id,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=1024,
+                max_tokens=2048,
+                timeout=60,
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            logger.debug(f"LLM 响应: length={len(content)}")
+            return content
         except Exception as e:
             last_exc = e
+            logger.warning(f"LLM 调用失败 attempt={attempt+1}: {e}")
             if attempt < MAX_RETRIES - 1:
-                time.sleep(2 ** attempt)
+                wait_time = 2 ** attempt
+                logger.info(f"等待 {wait_time} 秒后重试...")
+                time.sleep(wait_time)
 
     raise RuntimeError(f"LLM 调用失败（重试 {MAX_RETRIES} 次）：{last_exc}")
 
