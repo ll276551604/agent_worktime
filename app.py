@@ -117,10 +117,12 @@ def delete_session(session_id):
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """聊天接口（支持多轮对话和智能评估）"""
+    """聊天接口（支持智能引导对话和评估）"""
     from agent.session_manager import SessionManager, ChatSession
+    from agent.dialog_manager import DialogManager
     
     sm = SessionManager()
+    dm = DialogManager()
     data = request.get_json()
     
     session_id = data.get("session_id")
@@ -144,68 +146,50 @@ def chat():
     # 添加用户消息到会话
     session.add_message("user", message)
     
-    # 获取上下文（最近5条消息）
-    context = session.get_context_prompt(5)
+    # 获取对话历史
+    conversation_history = session.get_messages()
     
     logger.info(f"聊天请求: session={session_id}, message_length={len(message)}")
 
-    # 使用智能评估模型处理需求
-    try:
-        eval_result = worktime_agent.evaluate_text_requirement(message, "composite")
-        session.add_message("assistant", eval_result.get("formatted_result", ""))
+    # 提取已收集的需求信息
+    info = dm.extract_requirement_info(conversation_history)
+    
+    # 检查信息是否完整
+    if dm.check_info_complete(info):
+        # 信息完整，执行评估
+        logger.info(f"需求信息完整，开始评估: {info}")
+        
+        try:
+            # 构建完整的需求描述
+            full_requirement = f"【模块】{info['module']} 【类型】{info['type']} 【描述】{info['requirement']}"
+            
+            eval_result = worktime_agent.evaluate_text_requirement(full_requirement, "composite")
+            session.add_message("assistant", eval_result.get("formatted_result", ""))
+            
+            return jsonify({
+                "success": True,
+                "session_id": session_id,
+                "analysis": eval_result["analysis"],
+                "decomposition": eval_result["decomposition"],
+                "evaluation": eval_result["evaluation"],
+                "stage": "assessment",
+                "collected_info": info
+            })
+        except Exception as e:
+            logger.error(f"智能评估失败: {e}")
+            return jsonify({"error": f"评估失败: {str(e)}"}), 500
+    else:
+        # 信息不完整，进行追问
+        question = dm.get_next_question(info)
+        session.add_message("assistant", question)
         
         return jsonify({
             "success": True,
             "session_id": session_id,
-            "analysis": eval_result["analysis"],
-            "decomposition": eval_result["decomposition"],
-            "evaluation": eval_result["evaluation"],
+            "message": question,
+            "stage": "collecting",
+            "collected_info": info
         })
-    except Exception as e:
-        logger.error(f"智能评估失败: {e}")
-        # 如果智能评估失败，回退到传统流程
-        task_id = str(uuid.uuid4())
-    q = queue.Queue()
-    task_queues[task_id] = q
-    task_timestamps[task_id] = time.time()
-
-    def run():
-        def progress_cb(current, total, row_num, status, preview, page_count=0):
-            q.put({
-                "current":    current,
-                "total":      total,
-                "row":        row_num,
-                "status":     status,
-                "preview":    preview,
-                "page_count": page_count,
-            })
-
-        try:
-            result = worktime_agent.run_chat(
-                message, 
-                model_id=model_id, 
-                progress_callback=progress_cb,
-                context=context
-            )
-            
-            # 添加助手回复到会话
-            session.add_message("assistant", result["g_text"])
-            
-            q.put({
-                "done":        True,
-                "session_id":  session_id,
-                "g_text":      result["g_text"],
-                "total_days":  result["total_days"],
-                "page_count":  result["page_count"],
-                "is_question": result.get("is_question", False),
-            })
-            logger.info(f"聊天完成: session={session_id}, days={result['total_days']}")
-        except Exception as e:
-            logger.error(f"聊天失败: session={session_id}, error={e}")
-            q.put({"error": str(e)})
-
-    threading.Thread(target=run, daemon=True).start()
-    return jsonify({"task_id": task_id, "session_id": session_id})
 
 
 @app.route("/upload", methods=["POST"])

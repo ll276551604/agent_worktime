@@ -401,6 +401,105 @@
       40% { opacity: 1; transform: scale(1); }
     }
 
+    /* 欢迎消息样式 */
+    .welcome-message {
+      text-align: center;
+      padding: 40px 24px;
+      max-width: 520px;
+      margin: 0 auto;
+    }
+    .welcome-message .avatar-ai {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    .welcome-message h2 {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--fg);
+      margin-bottom: 8px;
+    }
+    .welcome-message p {
+      color: var(--muted-fg);
+      font-size: 14px;
+      margin-bottom: 24px;
+    }
+    .welcome-message .info-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--accent);
+      padding: 16px;
+      border-radius: var(--radius);
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    .welcome-message .info-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--muted-fg);
+    }
+    .welcome-message .info-icon {
+      font-size: 14px;
+      width: 20px;
+    }
+
+    /* 进度指示样式 */
+    .progress-indicator {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow-sm);
+    }
+    .progress-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--fg);
+      margin-bottom: 12px;
+    }
+    .progress-steps {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .progress-step {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: calc(var(--radius) - 4px);
+      background: var(--accent);
+      transition: all 0.2s;
+    }
+    .progress-step.completed {
+      background: oklch(0.93 0.06 145);
+    }
+    .progress-step.pending {
+      opacity: 0.6;
+    }
+    .progress-step .step-icon {
+      font-size: 14px;
+    }
+    .progress-step .step-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--fg);
+    }
+    .progress-step .step-value {
+      font-size: 11px;
+      color: var(--muted-fg);
+      margin-left: 4px;
+    }
+    .step-arrow {
+      color: var(--muted-fg);
+      font-size: 14px;
+      margin: 0 2px;
+    }
+
     .input-bar {
       border-top: 1px solid var(--border);
       background: var(--bg);
@@ -957,7 +1056,7 @@
         processingFile = false;
       }
     } else {
-      // 文本处理流程（智能评估）
+      // 文本处理流程（智能引导对话）
       const messageText = document.querySelector('.message.user:last-child .message-content').textContent;
       try {
         const resp = await fetch('/chat', {
@@ -985,14 +1084,22 @@
         currentSessionId = data.session_id;
         localStorage.setItem('wt_session_id', currentSessionId);
         
-        // 缓存评估结果用于导出（如果有评估结果）
-        if (data.evaluation) {
+        // 根据阶段处理响应
+        if (data.stage === 'collecting') {
+          // 正在收集信息，显示追问
+          addMessage('ai', data.message, true);
+          // 显示进度指示
+          if (data.collected_info) {
+            updateProgressIndicator(data.collected_info);
+          }
+        } else if (data.stage === 'assessment') {
+          // 评估完成，显示结果
           lastEvaluationResult = {
             results: [{
               original_requirement: {
-                module: '',
-                feature: text.split('\n')[0] || text,
-                detail: text
+                module: data.collected_info?.module || '',
+                feature: data.collected_info?.requirement?.split('\n')[0] || '',
+                detail: data.collected_info?.requirement || ''
               },
               analysis: data.analysis,
               decomposition: data.decomposition,
@@ -1003,9 +1110,12 @@
           };
           document.getElementById('btn-export-eval').classList.remove('hidden');
           addMessage('ai', formatEvaluationResult(data));
-        } else {
-          listenProgress(data.task_id, false, true);
+          // 清除进度指示
+          clearProgressIndicator();
         }
+        
+        scrollBottom();
+        document.getElementById('btn-send').disabled = false;
       } catch (e) {
         showError('启动失败：' + e.message);
         hideThinking();
@@ -1191,13 +1301,27 @@
     welcomeMsg.className = 'welcome-message';
     welcomeMsg.id = 'welcome-message';
     welcomeMsg.innerHTML = `
-      <h2>有什么需要拆解的？</h2>
-      <p>输入需求描述或上传 Excel 文件，AI 自动分析并评估工时</p>
+      <div class="avatar-ai">🤖</div>
+      <h2>你好！我是你的工时评估助手</h2>
+      <p>请告诉我你要评估的需求，我会引导你提供必要信息并进行专业评估~</p>
+      <div class="info-panel">
+        <div class="info-item">
+          <span class="info-icon">📝</span>
+          <span>描述你的需求内容</span>
+        </div>
+        <div class="info-item">
+          <span class="info-icon">📁</span>
+          <span>告诉我所属业务模块</span>
+        </div>
+        <div class="info-item">
+          <span class="info-icon">🎯</span>
+          <span>说明是新增、优化还是修复</span>
+        </div>
+      </div>
       <div class="feature-badges">
+        <span class="badge">智能引导</span>
         <span class="badge">需求分析</span>
-        <span class="badge">智能拆解</span>
         <span class="badge">工时估算</span>
-        <span class="badge">知识库驱动</span>
         <span class="badge">综合评估</span>
       </div>
     `;
@@ -1276,6 +1400,51 @@
     document.getElementById('file-tag').textContent = '';
     document.getElementById('skip-label').classList.add('hidden');
     fileId = null;
+  }
+
+  function updateProgressIndicator(info) {
+    // 创建或更新进度指示
+    let progressBar = document.getElementById('progress-indicator');
+    if (!progressBar) {
+      progressBar = document.createElement('div');
+      progressBar.id = 'progress-indicator';
+      progressBar.className = 'progress-indicator';
+      document.getElementById('content-area').appendChild(progressBar);
+    }
+    
+    const steps = [
+      { key: 'requirement', label: '需求描述', icon: '📝' },
+      { key: 'module', label: '所属模块', icon: '📁' },
+      { key: 'type', label: '需求类型', icon: '🎯' }
+    ];
+    
+    let html = '<div class="progress-title">📋 需求信息收集进度</div>';
+    html += '<div class="progress-steps">';
+    
+    steps.forEach((step, index) => {
+      const completed = info[step.key] && info[step.key].trim();
+      const status = completed ? 'completed' : 'pending';
+      html += `
+        <div class="progress-step ${status}">
+          <span class="step-icon">${completed ? '✅' : step.icon}</span>
+          <span class="step-label">${step.label}</span>
+          ${completed ? `<span class="step-value">${info[step.key].trim().substring(0, 10)}...</span>` : ''}
+        </div>
+      `;
+      if (index < steps.length - 1) {
+        html += '<span class="step-arrow">→</span>';
+      }
+    });
+    
+    html += '</div>';
+    progressBar.innerHTML = html;
+  }
+
+  function clearProgressIndicator() {
+    const progressBar = document.getElementById('progress-indicator');
+    if (progressBar) {
+      progressBar.remove();
+    }
   }
 
   function scrollBottom() {
