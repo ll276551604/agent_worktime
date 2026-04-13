@@ -10,6 +10,8 @@ class DialogManager:
     def __init__(self):
         self.prompt_path = os.path.join(os.path.dirname(__file__), '..', 'prompts', 'guiding_prompt.txt')
         self.system_prompt = self._load_prompt()
+        # 延迟导入知识库管理器，避免循环依赖
+        self.knowledge_manager = None
         
     def _load_prompt(self) -> str:
         """加载系统提示词"""
@@ -71,8 +73,52 @@ class DialogManager:
         # 默认视为评估需求
         return 'evaluation'
     
+    def _init_knowledge_manager(self):
+        """延迟初始化知识库管理器"""
+        if self.knowledge_manager is None:
+            from agent.knowledge_manager import KnowledgeManager
+            self.knowledge_manager = KnowledgeManager()
+        
+    def _analyze_from_knowledge_base(self, requirement_text: str) -> Dict:
+        """通过知识库智能分析需求，识别模块和需求类型"""
+        self._init_knowledge_manager()
+        
+        result = {
+            'module': '',
+            'type': '',
+            'confidence': 0.0
+        }
+        
+        try:
+            # 调用知识库进行分析
+            requirement = {
+                "feature": requirement_text,
+                "detail": requirement_text,
+                "module": ""
+            }
+            analysis = self.knowledge_manager.analyze_requirement(requirement)
+            
+            # 从分析结果中提取模块信息
+            if analysis.get('related_modules'):
+                result['module'] = analysis['related_modules'][0]
+            
+            # 根据知识库判断需求类型（新增/调整）
+            if analysis.get('judgment'):
+                if analysis['judgment'] == '新增':
+                    result['type'] = '新增功能'
+                else:
+                    result['type'] = '调整优化'
+            
+            result['confidence'] = analysis.get('confidence', 0.0)
+            
+        except Exception as e:
+            # 如果知识库分析失败，使用默认规则
+            pass
+        
+        return result
+    
     def extract_requirement_info(self, conversation_history: List[Dict]) -> Dict[str, str]:
-        """从对话历史中提取需求信息"""
+        """从对话历史中提取需求信息（结合知识库智能分析）"""
         info = {
             'requirement': '',
             'module': '',
@@ -85,37 +131,44 @@ class DialogManager:
             
             content = msg['content']
             
-            # 尝试提取模块信息
-            module_patterns = [
-                r'(用户管理|订单管理|报表系统|权限管理|配置管理|数据分析|系统设置)',
-                r'(模块|系统|功能)[:：]\s*(\w+)'
-            ]
-            for pattern in module_patterns:
-                match = re.search(pattern, content)
-                if match and not info['module']:
-                    info['module'] = match.group(1)
-            
-            # 尝试提取需求类型
-            type_patterns = [
-                r'(新增|新增功能|新增需求)',
-                r'(调整|优化|修改|改进)',
-                r'(bug|修复|bug修复|问题修复)'
-            ]
-            for pattern in type_patterns:
-                if re.search(pattern, content, re.IGNORECASE) and not info['type']:
-                    if '新增' in content:
-                        info['type'] = '新增功能'
-                    elif 'bug' in content or '修复' in content:
-                        info['type'] = 'Bug修复'
-                    else:
-                        info['type'] = '调整优化'
-            
             # 累积需求描述
             if content:
                 if info['requirement']:
                     info['requirement'] += ' ' + content
                 else:
                     info['requirement'] = content
+        
+        requirement_text = info['requirement']
+        
+        # 首先使用规则匹配提取模块和类型（优先级更高）
+        # 尝试提取模块信息
+        module_patterns = [
+            r'(用户管理|订单管理|报表系统|权限管理|配置管理|数据分析|系统设置)',
+            r'(模块|系统|功能)[:：]\s*(\w+)'
+        ]
+        for pattern in module_patterns:
+            match = re.search(pattern, requirement_text)
+            if match and not info['module']:
+                info['module'] = match.group(1)
+        
+        # 尝试提取需求类型（规则匹配优先）
+        if 'bug' in requirement_text.lower() or '修复' in requirement_text:
+            info['type'] = 'Bug修复'
+        elif '新增' in requirement_text:
+            info['type'] = '新增功能'
+        elif any(word in requirement_text for word in ['调整', '优化', '修改', '改进']):
+            info['type'] = '调整优化'
+        
+        # 如果规则匹配未能识别，则通过知识库智能分析
+        if info['requirement'] and (not info['module'] or not info['type']):
+            kb_result = self._analyze_from_knowledge_base(info['requirement'])
+            
+            # 如果知识库分析有较高置信度，使用分析结果
+            if kb_result['confidence'] >= 0.6:
+                if kb_result['module'] and not info['module']:
+                    info['module'] = kb_result['module']
+                if kb_result['type'] and not info['type']:
+                    info['type'] = kb_result['type']
         
         return info
     
@@ -128,16 +181,28 @@ class DialogManager:
         ])
     
     def get_next_question(self, info: Dict) -> Optional[str]:
-        """获取下一个需要追问的问题"""
-        if not info.get('requirement', '').strip():
+        """获取下一个需要追问的问题（智能确认已识别信息）"""
+        requirement = info.get('requirement', '').strip()
+        module = info.get('module', '').strip()
+        req_type = info.get('type', '').strip()
+        
+        # 如果需求描述为空
+        if not requirement:
             return '好的，请描述一下具体的需求内容~'
         
-        if not info.get('module', '').strip():
+        # 如果模块为空
+        if not module:
+            # 如果已有部分信息，先确认已识别的内容
+            if req_type:
+                return f'已识别需求类型为「{req_type}」。请问这个需求属于哪个业务模块呢？（比如：用户管理、订单管理、报表系统等）'
             return '请问这个需求属于哪个业务模块呢？（比如：用户管理、订单管理、报表系统等）'
         
-        if not info.get('type', '').strip():
-            return '这是新增功能、调整优化还是Bug修复呢？'
+        # 如果需求类型为空
+        if not req_type:
+            # 确认已识别的模块，并询问类型
+            return f'已识别需求属于「{module}」模块。这是新增功能、调整优化还是Bug修复呢？'
         
+        # 信息完整，返回None
         return None
     
     def build_prompt(self, conversation_history: List[Dict]) -> str:

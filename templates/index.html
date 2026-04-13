@@ -413,15 +413,15 @@
       margin-bottom: 16px;
     }
     .welcome-message h2 {
-      font-size: 20px;
+      font-size: 16px;
       font-weight: 600;
       color: var(--fg);
       margin-bottom: 8px;
     }
     .welcome-message p {
       color: var(--muted-fg);
-      font-size: 14px;
-      margin-bottom: 24px;
+      font-size: 12px;
+      margin-bottom: 16px;
     }
     .welcome-message .info-panel {
       display: flex;
@@ -436,8 +436,8 @@
     .welcome-message .info-item {
       display: flex;
       align-items: center;
-      gap: 8px;
-      font-size: 13px;
+      gap: 6px;
+      font-size: 11px;
       color: var(--muted-fg);
     }
     .welcome-message .info-icon {
@@ -575,14 +575,15 @@
       width: 100%;
       border: none;
       background: transparent;
-      font-size: 14px;
+      font-size: 12px;
       color: var(--fg);
       outline: none;
-      padding: 8px 0;
+      padding: 6px 0;
       font-family: inherit;
     }
     .text-input::placeholder {
       color: var(--muted-fg);
+      font-size: 12px;
     }
 
     .file-display {
@@ -839,7 +840,6 @@
           </svg>
         </button>
       </div>
-      <p class="input-hint" id="input-hint">输入需求或上传 Excel 文件，AI 自动分析并评估工时</p>
     </div>
   </div>
 </div>
@@ -857,6 +857,15 @@
   
   // 评估结果缓存（用于导出）
   let lastEvaluationResult = null;
+
+  // HTML 转义函数
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
 
   if (isDark) document.documentElement.classList.add('dark');
 
@@ -896,6 +905,7 @@
     `).join('');
   }
   renderSidebar();
+  initWelcomeMessage();
 
   function addSession(filename, rows) {
     sessions.unshift({ filename, rows, time: Date.now() });
@@ -1074,7 +1084,7 @@
         
         if (data.error) { 
           showError(data.error); 
-          addMessage('ai', `❌ 处理失败：${data.error}`);
+          addMessage('ai', `处理失败：${data.error}`);
           scrollBottom();
           document.getElementById('btn-send').disabled = false;
           return; 
@@ -1087,7 +1097,7 @@
         // 根据阶段处理响应
         if (data.stage === 'collecting') {
           // 正在收集信息，显示追问
-          addMessage('ai', data.message, true);
+          addMessage('ai', data.message);
           // 显示进度指示
           if (data.collected_info) {
             updateProgressIndicator(data.collected_info);
@@ -1175,8 +1185,8 @@
     let content = g_text;
     if (total_days || page_count) {
       content += '\n\n';
-      if (page_count) content += `📄 页面数：${page_count}\n`;
-      if (total_days) content += `⏱️ 工时估算：${total_days} 天`;
+      if (page_count) content += `页面数：${page_count}\n`;
+      if (total_days) content += `工时估算：${total_days} 天`;
     }
     addMessage('ai', content);
   }
@@ -1249,7 +1259,7 @@
         hideThinking();
         processingFile = false;
         showError('处理出错：' + msg.error);
-        addMessage('ai', `❌ 处理出错：${msg.error}`);
+        addMessage('ai', `处理出错：${msg.error}`);
         scrollBottom();
         document.getElementById('btn-send').disabled = false;
         return;
@@ -1274,6 +1284,28 @@
     };
   }
 
+  function initWelcomeMessage() {
+    const container = document.getElementById('content-area');
+    const existingWelcomeMsg = document.getElementById('welcome-message');
+    if (existingWelcomeMsg) {
+      existingWelcomeMsg.remove();
+    }
+    const welcomeMsg = document.createElement('div');
+    welcomeMsg.className = 'welcome-message';
+    welcomeMsg.id = 'welcome-message';
+    welcomeMsg.innerHTML = `
+      <h2>智能工时评估助手</h2>
+      <p>欢迎使用智能工时评估助手！我将帮助您快速分析需求并估算开发工时。</p>
+      <div class="info-panel">
+        <div class="info-item">1. 输入需求描述（如：用户管理模块添加导出功能）</div>
+        <div class="info-item">2. 系统自动识别业务模块和需求类型</div>
+        <div class="info-item">3. 获取专业的工时评估报告</div>
+      </div>
+    `;
+    container.insertBefore(welcomeMsg, document.getElementById('messages-container'));
+    scrollTop();
+  }
+
   function resetAll() {
     fileId = null;
     clearError();
@@ -1291,42 +1323,9 @@
     chatHistory = [];
     lastEvaluationResult = null;
     localStorage.removeItem('wt_session_id');
-
-    const container = document.getElementById('content-area');
-    const existingWelcomeMsg = document.getElementById('welcome-message');
-    if (existingWelcomeMsg) {
-      existingWelcomeMsg.remove();
-    }
-    const welcomeMsg = document.createElement('div');
-    welcomeMsg.className = 'welcome-message';
-    welcomeMsg.id = 'welcome-message';
-    welcomeMsg.innerHTML = `
-      <div class="avatar-ai">🤖</div>
-      <h2>你好！我是你的工时评估助手</h2>
-      <p>请告诉我你要评估的需求，我会引导你提供必要信息并进行专业评估~</p>
-      <div class="info-panel">
-        <div class="info-item">
-          <span class="info-icon">📝</span>
-          <span>描述你的需求内容</span>
-        </div>
-        <div class="info-item">
-          <span class="info-icon">📁</span>
-          <span>告诉我所属业务模块</span>
-        </div>
-        <div class="info-item">
-          <span class="info-icon">🎯</span>
-          <span>说明是新增、优化还是修复</span>
-        </div>
-      </div>
-      <div class="feature-badges">
-        <span class="badge">智能引导</span>
-        <span class="badge">需求分析</span>
-        <span class="badge">工时估算</span>
-        <span class="badge">综合评估</span>
-      </div>
-    `;
-    container.insertBefore(welcomeMsg, document.getElementById('messages-container'));
-    scrollTop();
+    
+    // 显示欢迎消息
+    initWelcomeMessage();
   }
 
   // 导出评估结果
@@ -1413,12 +1412,12 @@
     }
     
     const steps = [
-      { key: 'requirement', label: '需求描述', icon: '📝' },
-      { key: 'module', label: '所属模块', icon: '📁' },
-      { key: 'type', label: '需求类型', icon: '🎯' }
+      { key: 'requirement', label: '需求描述' },
+      { key: 'module', label: '所属模块' },
+      { key: 'type', label: '需求类型' }
     ];
     
-    let html = '<div class="progress-title">📋 需求信息收集进度</div>';
+    let html = '<div class="progress-title">需求信息收集进度</div>';
     html += '<div class="progress-steps">';
     
     steps.forEach((step, index) => {
@@ -1426,7 +1425,6 @@
       const status = completed ? 'completed' : 'pending';
       html += `
         <div class="progress-step ${status}">
-          <span class="step-icon">${completed ? '✅' : step.icon}</span>
           <span class="step-label">${step.label}</span>
           ${completed ? `<span class="step-value">${info[step.key].trim().substring(0, 10)}...</span>` : ''}
         </div>
@@ -1454,14 +1452,6 @@
 
   function scrollTop() {
     document.getElementById('content-area').scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  function esc(s) {
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
   }
 </script>
 </body>

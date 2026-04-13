@@ -45,6 +45,10 @@ class ChatSession:
         """获取最近的消息历史"""
         recent = self.messages[-limit:]
         return [m.to_dict() for m in recent]
+    
+    def get_messages(self) -> List[Dict]:
+        """获取所有消息"""
+        return [m.to_dict() for m in self.messages]
 
     def get_context_prompt(self, limit: int = 5) -> str:
         """生成上下文提示词"""
