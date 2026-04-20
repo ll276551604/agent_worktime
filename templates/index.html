@@ -1117,31 +1117,36 @@
         localStorage.setItem('wt_session_id', currentSessionId);
         
         // 根据阶段处理响应
-        if (data.stage === 'collecting') {
-          // 正在收集信息，显示追问
-          addMessage('ai', data.message);
-          // 显示进度指示
-          if (data.collected_info) {
-            updateProgressIndicator(data.collected_info);
-          }
+        if (data.stage === 'collecting' || data.stage === 'clarifying') {
+          // 正在收集信息或回答问题，使用纯对话输出
+          addMessage('ai', data.message, formatProcess(data.process));
+        } else if (data.stage === 'answering') {
+          addMessage('ai', data.formatted_result || data.message, formatProcess(data.process));
         } else if (data.stage === 'assessment') {
           // 评估完成，显示结果
+          const info = data.collected_info || {};
           lastEvaluationResult = {
             results: [{
               original_requirement: {
-                module: data.collected_info?.module || '',
-                feature: data.collected_info?.requirement?.split('\n')[0] || '',
-                detail: data.collected_info?.requirement || ''
+                module: info.module || '',
+                feature: info.requirement?.split('\n')[0] || '',
+                detail: info.requirement || ''
               },
-              analysis: data.analysis,
-              decomposition: data.decomposition,
-              evaluation: data.evaluation,
+              analysis: {
+                judgment: info.type || '未知',
+                confidence: info.confidence || 0.8,
+                related_modules: info.related_modules || [],
+                existing_features: info.existing_features || [],
+                suggestions: info.suggestions || []
+              },
+              decomposition: data.decomposition || [],
+              evaluation: data.evaluation || {},
             }],
-            total_days: data.evaluation.effort_days,
+            total_days: data.evaluation?.effort_days || data.total_days || 0,
             requirement_count: 1,
           };
           document.getElementById('btn-export-eval').classList.remove('hidden');
-          addMessage('ai', formatEvaluationResult(data));
+          addMessage('ai', formatEvaluationResult(data), formatProcess(data.process));
           // 清除进度指示
           clearProgressIndicator();
         }
@@ -1156,36 +1161,59 @@
     }
   }
 
+  function formatProcess(process) {
+    if (!process) return '';
+    if (Array.isArray(process)) {
+      return process.map((step, index) => `${index + 1}. ${step}`).join('\n');
+    }
+    return String(process);
+  }
+
   function formatEvaluationResult(data) {
     let result = `【需求分析】\n`;
-    result += `类型: ${data.analysis.judgment || '未知'}（置信度: ${Math.round((data.analysis.confidence || 0) * 100)}%）\n\n`;
-    
-    if (data.analysis.related_modules && data.analysis.related_modules.length > 0) {
-      result += `相关模块: ${data.analysis.related_modules.join(', ')}\n`;
+    // 从 collected_info 中获取分析信息
+    const info = data.collected_info || {};
+    const judgment = info.type || '未知';
+    const confidence = info.confidence || 0.8; // 默认置信度
+    result += `类型: ${judgment}（置信度: ${Math.round(confidence * 100)}%）\n\n`;
+
+    if (info.related_modules && info.related_modules.length > 0) {
+      result += `相关模块: ${info.related_modules.join(', ')}\n`;
     }
-    if (data.analysis.existing_features && data.analysis.existing_features.length > 0) {
-      result += `相似功能: ${data.analysis.existing_features.join(', ')}\n`;
+    if (info.existing_features && info.existing_features.length > 0) {
+      result += `相似功能: ${info.existing_features.join(', ')}\n`;
     }
-    
+
     result += `\n【初步拆解】\n`;
-    data.decomposition.forEach(part => {
-      result += `【${part.type}】${part.name}\n`;
-      part.features.forEach(feat => {
-        result += `  - ${feat}\n`;
+    if (data.decomposition && data.decomposition.length > 0) {
+      data.decomposition.forEach(part => {
+        result += `【${part.type}】${part.name}\n`;
+        if (part.features && part.features.length > 0) {
+          part.features.forEach(feat => {
+            result += `  - ${feat}\n`;
+          });
+        }
       });
-    });
-    
+    } else {
+      result += `暂无拆解信息\n`;
+    }
+
     result += `\n【工时评估】\n`;
-    result += `模型: ${data.evaluation.model || '综合评估'}\n`;
-    result += `预估工时: ${data.evaluation.effort_days || 0} 天\n`;
-    
-    if (data.analysis.suggestions && data.analysis.suggestions.length > 0) {
+    if (data.evaluation) {
+      result += `模型: ${data.evaluation.model || '综合评估'}\n`;
+      result += `预估工时: ${data.evaluation.effort_days || 0} 天\n`;
+    } else {
+      result += `预估工时: ${data.total_days || 0} 天\n`;
+    }
+
+    // 添加建议信息（如果有的话）
+    if (info.suggestions && info.suggestions.length > 0) {
       result += `\n【建议】\n`;
-      data.analysis.suggestions.forEach(suggestion => {
+      info.suggestions.forEach(suggestion => {
         result += `• ${suggestion}\n`;
       });
     }
-    
+
     return result;
   }
 
@@ -1197,7 +1225,7 @@
       <div class="message-avatar">${role === 'user' ? '我' : 'AI'}</div>
       <div class="message-bubble">
         <div class="message-content">${esc(content)}</div>
-        ${meta ? `<div class="message-meta">${meta}</div>` : ''}
+        ${meta ? `<div class="message-meta"><pre>${esc(meta)}</pre></div>` : ''}
       </div>
     `;
     container.appendChild(message);

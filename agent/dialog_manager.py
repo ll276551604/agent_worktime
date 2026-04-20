@@ -176,6 +176,57 @@ class DialogManager:
         
         return ''
     
+    def _is_requirement_description(self, text: str) -> bool:
+        """检查输入文本是否是需求描述"""
+        if not text or len(text.strip()) < 5:
+            return False
+        
+        text_lower = text.lower()
+        
+        # 检查是否包含需求相关的关键词
+        requirement_indicators = [
+            '需求', '功能', '开发', '实现', '添加', '新增', '修改', '调整', '优化', '修复', 'bug', '问题',
+            '页面', '接口', '按钮', '表单', '列表', '详情', '登录', '注册', '用户', '订单', '商品',
+            '系统', '后台', '前端', '后端', '数据库', 'API', '模块', '菜单', '权限', '角色',
+            '报表', '统计', '数据', '导入', '导出', '查询', '搜索', '筛选', '排序', '分页'
+        ]
+        
+        # 如果包含多个需求关键词，认为是需求
+        keyword_count = sum(1 for keyword in requirement_indicators if keyword in text_lower)
+        if keyword_count >= 2:
+            return True
+        
+        # 检查是否包含模块关键词
+        module_keyword_count = 0
+        for module, keywords in self.module_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    module_keyword_count += 1
+                    break
+        if module_keyword_count >= 1:
+            return True
+        
+        # 检查是否包含需求类型关键词
+        type_keyword_count = 0
+        for type_name, keywords in self.type_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    type_keyword_count += 1
+                    break
+        if type_keyword_count >= 1:
+            return True
+        
+        # 如果是简单的问候或闲聊，返回False
+        casual_phrases = ['你好', 'hello', 'hi', '您好', '早上好', '晚上好', '谢谢', '请问', '什么', '怎么', '为什么']
+        if any(phrase in text_lower for phrase in casual_phrases):
+            return False
+        
+        # 默认情况下，如果文本较长且不像是闲聊，认为是需求
+        if len(text.strip()) > 20:
+            return True
+        
+        return False
+    
     def extract_requirement_info(self, conversation_history: List[Dict]) -> Dict[str, str]:
         """从对话历史中提取需求信息（结合知识库智能分析）"""
         info = {
@@ -196,6 +247,11 @@ class DialogManager:
         
         # 合并所有用户消息作为需求描述
         requirement_text = ' '.join(user_messages).strip()
+        
+        # 检查是否是需求描述
+        if not self._is_requirement_description(requirement_text):
+            return info  # 返回空info，表示不是需求
+        
         info['requirement'] = requirement_text
         
         if not requirement_text:

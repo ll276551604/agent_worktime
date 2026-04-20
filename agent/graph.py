@@ -3,13 +3,12 @@
 LangGraph StateGraph 定义
 图流程：rebuild_features → estimate_worktime
 条件边：pages_features 为空且 retry_count < 2 时回到 rebuild_features
-每行需求共 2 次 LLM 调用
 """
 import json
 import os
 import re
 import sys
-from typing import TypedDict, List
+from typing import TypedDict, List, Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -25,21 +24,29 @@ from config import KB_FEATURE_RULES, KB_SYSTEM_CAPS, BUSINESS_KB_DIR
 # State 定义
 # ============================================================
 class RequirementState(TypedDict):
-    # 输入
+    # ── 输入 ──────────────────────────────────────────────────
     raw_requirement:  dict
     kb_feature_rules: dict
     kb_system_caps:   dict
     kb_business_docs: List[dict]
     model_id:         str
 
-    # 节点1 输出：页面 × 功能点结构
-    pages_features: List[dict]   # [{页面, 类型, 功能点:[str]}]
+    # ── 技能系统（可切换的评估体系）──────────────────────────
+    skill_id:       str           # 当前使用的技能 ID
+    skill_config:   dict          # 技能完整配置（从 skill_manager 获取）
+    skill_examples: List[dict]    # 历史评估案例（few-shot）
+    code_context:   str           # 代码知识库相关片段
 
-    # 节点2 输出
-    g_column_text: str           # G列最终文本
-    total_days:    float         # N列数字
+    # ── 节点1 输出：页面 × 功能点结构 ────────────────────────
+    pages_features: List[dict]    # [{页面, 类型, 功能点:[str]}]
+    kb_cases:       List[dict]    # 知识库检索结果（B端履约中台技能）
 
-    # 控制
+    # ── 节点2 输出：工时估算 ──────────────────────────────────
+    g_column_text:  str           # G列最终文本
+    total_days:     float         # N列数字（合计天数）
+    role_breakdown: Dict[str, float]  # 各角色工时 {"前端开发": 1.5, ...}
+
+    # ── 控制 ──────────────────────────────────────────────────
     retry_count: int
     errors:      List[str]
 
@@ -74,7 +81,7 @@ def build_graph():
 
 
 # ============================================================
-# 知识库加载（一次性，供 worktime_agent 调用）
+# 知识库加载（供 worktime_agent 调用）
 # ============================================================
 class KnowledgeLoader:
     def load(self) -> dict:
@@ -104,13 +111,13 @@ class KnowledgeLoader:
             try:
                 with open(fpath, encoding="utf-8") as f:
                     content = f.read()
-                lines    = content.split('\n')
-                meta     = lines[0] if lines else ""
-                domain   = self._extract(meta, r'domain:\s*(\S+)') or fname
+                lines     = content.split('\n')
+                meta      = lines[0] if lines else ""
+                domain    = self._extract(meta, r'domain:\s*(\S+)') or fname
                 subdomain = self._extract(meta, r'subdomain:\s*([^\s]+(?:\s+[^\s:]+)*?)(?=\s+\w+:)')
-                recall   = self._extract(meta, r'recall_when:\s*"([^"]+)"')
-                digest   = self._extract(meta, r'chapter_digest:\s*(.+?)(?=related_docs:|$)')
-                body     = '\n'.join(l for l in lines[5:65] if l.strip())
+                recall    = self._extract(meta, r'recall_when:\s*"([^"]+)"')
+                digest    = self._extract(meta, r'chapter_digest:\s*(.+?)(?=related_docs:|$)')
+                body      = '\n'.join(l for l in lines[5:65] if l.strip())
 
                 terms = set()
                 for t in [fname, domain, subdomain or "", recall or ""]:

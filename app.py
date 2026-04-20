@@ -192,116 +192,155 @@ def delete_session(session_id):
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """聊天接口（智能识别+直接评估模式）"""
-    from agent.session_manager import SessionManager, ChatSession
+    """聊天接口 — LangGraph 智能拆解 + 可切换技能 + 按角色工时输出"""
+    from agent.session_manager import SessionManager
     from agent.dialog_manager import DialogManager
-    
-    sm = SessionManager()
-    dm = DialogManager()
-    data = request.get_json()
-    
+    from agent import skill_manager as sm
+
+    session_mgr = SessionManager()
+    dm          = DialogManager()
+    data        = request.get_json()
+
     session_id = data.get("session_id")
     message    = (data.get("message") or "").strip()
     model_id   = data.get("model_id", DEFAULT_MODEL)
+    skill_id   = data.get("skill_id") or sm.get_current_skill_id()
 
     if not message:
         return jsonify({"error": "消息内容为空"}), 400
 
-    # 获取或创建会话
+    # ── 获取/创建会话 ────────────────────────────────────────
     if session_id:
-        session = sm.get_session(session_id)
-    else:
-        session = sm.create_session()
+        session = session_mgr.get_session(session_id)
+    if not session_id or not session:
+        session = session_mgr.create_session()
         session_id = session.session_id
 
-    if not session:
-        session = sm.create_session()
-        session_id = session.session_id
-
-    # 添加用户消息到会话
     session.add_message("user", message)
-    
-    # 获取对话历史
     conversation_history = session.get_messages()
-    
-    logger.info(f"聊天请求: session={session_id}, message_length={len(message)}")
+    logger.info(f"聊天请求: session={session_id} skill={skill_id} msg_len={len(message)}")
 
-    # ============== 智能分析用户输入 ==============
-    # 使用增强版的分析方法，自动识别模块和需求类型
-    info = dm.extract_requirement_info(conversation_history)
-    
-    # ============== 检查并补充默认值 ==============
-    # 直接检查信息完整性（会自动补充默认值）
-    is_complete = dm.check_info_complete(info)
-    
-    # 记录自动识别结果
-    auto_detected_info = {
-        'module_detected': bool(info.get('auto_detected', {}).get('module')),
-        'type_detected': bool(info.get('auto_detected', {}).get('type'))
+    intent = dm.analyze_intent(message)
+    process_log = [f"意图分析：{intent}"]
+
+    # ── 提取需求信息（模块/类型自动识别） ───────────────────
+    info           = dm.extract_requirement_info(conversation_history)
+    is_complete    = dm.check_info_complete(info)
+    auto_detected  = {
+        "module_detected": bool(info.get("auto_detected", {}).get("module")),
+        "type_detected":   bool(info.get("auto_detected", {}).get("type")),
     }
-    logger.info(f"自动识别结果: 模块={info.get('module')}, 类型={info.get('type')}, 自动识别={auto_detected_info}")
-    
-    # ============== 直接执行评估 ==============
-    # 只要有需求描述就直接评估，不再追问
-    if is_complete:
-        logger.info(f"开始评估: 模块={info['module']}, 类型={info['type']}")
-        
-        try:
-            # 构建完整的需求描述
-            full_requirement = f"【模块】{info['module']} 【类型】{info['type']} 【描述】{info['requirement']}"
-            
-            eval_result = worktime_agent.evaluate_text_requirement(full_requirement, "composite")
-            formatted_result = eval_result.get("formatted_result", "")
-            
-            # 构建响应消息，显示自动识别的内容
-            auto_detected_note = ""
-            if info.get('auto_detected', {}).get('module'):
-                auto_detected_note += f"已自动识别模块：{info['module']}；"
-            if info.get('auto_detected', {}).get('type'):
-                auto_detected_note += f"已自动识别类型：{info['type']}"
-            
-            # 如果有未识别的项，提示用户可以修改
-            note_lines = []
-            if not info.get('auto_detected', {}).get('module') and info['module'] == '未指定模块':
-                note_lines.append("⚠️ 模块未识别，请确认是否需要调整")
-            if not info.get('auto_detected', {}).get('type') and info['type'] == '新增功能':
-                note_lines.append("⚠️ 需求类型未识别，默认按新增功能评估")
-            
-            if note_lines:
-                note_lines.append("如需修改，请直接说明（如：修改为订单管理模块/Bug修复）")
-                formatted_result = f"【注意】{' | '.join(note_lines)}\n\n" + formatted_result
-            
-            if auto_detected_note:
-                formatted_result = f"【智能识别】{auto_detected_note}\n\n" + formatted_result
-            
-            session.add_message("assistant", formatted_result)
-            
-            return jsonify({
-                "success": True,
-                "session_id": session_id,
-                "analysis": eval_result["analysis"],
-                "decomposition": eval_result["decomposition"],
-                "evaluation": eval_result["evaluation"],
-                "stage": "assessment",
-                "collected_info": info,
-                "auto_detected": auto_detected_info,
-                "formatted_result": formatted_result
-            })
-        except Exception as e:
-            logger.error(f"智能评估失败: {e}")
-            return jsonify({"error": f"评估失败: {str(e)}"}), 500
+
+    if not is_complete:
+        if not info.get('requirement'):
+            process_log.append("未识别到有效需求描述，进入引导输入")
+        else:
+            process_log.append("检测到需求信息不完整，准备追问补充")
+            if not info.get('module'):
+                process_log.append("模块未识别")
+            if not info.get('type'):
+                process_log.append("需求类型未识别")
+
+        reply = dm.get_next_question(info) or "请继续描述您的需求内容，我会帮您补全模块和类型。"
+        session.add_message("assistant", reply)
+        return jsonify({"success": True, "session_id": session_id,
+                        "stage": "collecting", "message": reply,
+                        "collected_info": info, "auto_detected": auto_detected,
+                        "process": process_log})
+
+    # ── 拼装完整需求文本（含模块+类型上下文） ───────────────
+    full_text = f"【模块】{info['module']} 【类型】{info['type']} 【描述】{info['requirement']}"
+    process_log.append(f"提取到需求：{info['requirement'][:80]}")
+    if info.get('module'):
+        process_log.append(f"模块识别：{info['module']} ({'自动' if auto_detected['module_detected'] else '默认'})")
     else:
-        # 只有需求描述为空时才追问
-        session.add_message("assistant", "请描述一下具体的需求内容~")
-        
-        return jsonify({
-            "success": True,
-            "session_id": session_id,
-            "message": "请描述一下具体的需求内容~",
-            "stage": "collecting",
-            "collected_info": info,
-            "auto_detected": auto_detected_info
-        })
+        process_log.append("模块未识别，使用默认模块")
+    if info.get('type'):
+        process_log.append(f"需求类型识别：{info['type']} ({'自动' if auto_detected['type_detected'] else '默认'})")
+    else:
+        process_log.append("需求类型未识别，默认视为新增功能")
+    process_log.append("开始执行需求拆解与工时评估")
+
+    # ── 获取历史对话上下文（最近 3 轮）──────────────────────
+    history_ctx = ""
+    msgs = conversation_history[:-1]  # 排除刚加入的本条
+    if msgs:
+        recent = msgs[-6:]
+        history_ctx = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in recent)
+
+    try:
+        result = worktime_agent.run_chat(
+            text=full_text,
+            model_id=model_id,
+            context=history_ctx,
+            skill_id=skill_id,
+        )
+    except Exception as e:
+        logger.error(f"LangGraph 评估失败: {e}", exc_info=True)
+        return jsonify({"error": f"评估失败: {str(e)}"}), 500
+
+    # ── 需要澄清：需求描述过于简短 ──────────────────────────
+    if result.get("needs_clarification"):
+        process_log.append("评估结果认为需求描述过短，需要补充信息")
+        question = result["clarification_question"]
+        session.add_message("assistant", question)
+        return jsonify({"success": True, "session_id": session_id,
+                        "stage": "clarifying", "message": question,
+                        "collected_info": info, "auto_detected": auto_detected,
+                        "process": process_log})
+
+    # ── 追问模式（已有上下文，用户在追问） ──────────────────
+    if result.get("is_question"):
+        process_log.append("检测到用户追问，直接生成回答")
+        session.add_message("assistant", result["g_text"])
+        return jsonify({"success": True, "session_id": session_id,
+                        "stage": "answering", "formatted_result": result["g_text"],
+                        "collected_info": info, "process": process_log})
+
+    # ── 正常评估结果 ─────────────────────────────────────────
+    pages_features = result.get("pages_features", [])
+    role_breakdown = result.get("role_breakdown", {})
+    formatted_result = result["g_text"]
+
+    # 智能识别提示头
+    note_parts = []
+    if auto_detected["module_detected"]:
+        note_parts.append(f"模块：{info['module']}")
+    if auto_detected["type_detected"]:
+        note_parts.append(f"类型：{info['type']}")
+    if note_parts:
+        formatted_result = f"【智能识别】{'、'.join(note_parts)}\n\n" + formatted_result
+
+    process_log.append("评估完成，生成最终拆解与工时结果")
+    session.add_message("assistant", formatted_result)
+    logger.info(f"评估完成: session={session_id} skill={skill_id} "
+                f"pages={len(pages_features)} days={result['total_days']}")
+
+    return jsonify({
+        "success": True,
+        "session_id": session_id,
+        "stage": "assessment",
+        "skill_id": skill_id,
+        # 主要输出
+        "g_text":        result["g_text"],
+        "total_days":    result["total_days"],
+        "role_breakdown": role_breakdown,
+        "pages_features": pages_features,
+        # 向下兼容字段
+        "decomposition": [
+            {"type": p["类型"], "name": p["页面"], "features": p["功能点"]}
+            for p in pages_features
+        ],
+        "evaluation": {
+            "model": f"skill:{skill_id}",
+            "effort_days": result["total_days"],
+            "role_breakdown": role_breakdown,
+        },
+        "formatted_result": formatted_result,
+        "collected_info":   info,
+        "auto_detected":    auto_detected,
+        "process":          process_log,
+    })
 
 
 @app.route("/upload", methods=["POST"])
@@ -566,6 +605,111 @@ def evaluate_batch():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================
+# 技能管理接口
+# ============================================================
+
+@app.route("/skills", methods=["GET"])
+def list_skills():
+    """列出所有可用技能"""
+    from agent import skill_manager as sm
+    skills = sm.list_skills()
+    current = sm.get_current_skill_id()
+    return jsonify({"skills": skills, "current": current})
+
+
+@app.route("/skills/current", methods=["GET"])
+def get_current_skill():
+    """获取当前技能详情"""
+    from agent import skill_manager as sm
+    sid   = sm.get_current_skill_id()
+    skill = sm.get_skill(sid)
+    return jsonify({"skill_id": sid, "skill": skill})
+
+
+@app.route("/skills/switch", methods=["POST"])
+def switch_skill():
+    """切换当前全局技能"""
+    from agent import skill_manager as sm
+    data     = request.get_json()
+    skill_id = (data.get("skill_id") or "").strip()
+    if not skill_id:
+        return jsonify({"error": "skill_id 不能为空"}), 400
+    ok = sm.set_current_skill(skill_id)
+    if not ok:
+        available = [s["id"] for s in sm.list_skills()]
+        return jsonify({"error": f"技能不存在: {skill_id}", "available": available}), 404
+    logger.info(f"技能切换: {skill_id}")
+    return jsonify({"success": True, "current": skill_id})
+
+
+@app.route("/skills/<skill_id>", methods=["GET"])
+def get_skill(skill_id):
+    """获取指定技能的完整配置"""
+    from agent import skill_manager as sm
+    skill = sm.get_skill(skill_id)
+    return jsonify({"skill_id": skill_id, "skill": skill})
+
+
+@app.route("/skills/reload", methods=["POST"])
+def reload_skill():
+    """清除技能缓存，强制从文件重新加载（修改 JSON 后调用）"""
+    from agent import skill_manager as sm
+    data     = request.get_json() or {}
+    skill_id = data.get("skill_id")
+    if skill_id:
+        sm.reload_skill(skill_id)
+        logger.info(f"技能缓存已清除: {skill_id}")
+        return jsonify({"success": True, "reloaded": skill_id})
+    # 清除所有缓存
+    sm._skills_cache.clear()
+    logger.info("所有技能缓存已清除")
+    return jsonify({"success": True, "reloaded": "all"})
+
+
+@app.route("/skills/<skill_id>/examples", methods=["GET"])
+def get_skill_examples(skill_id):
+    """获取指定技能的历史评估案例"""
+    from agent import skill_manager as sm
+    limit    = int(request.args.get("limit", 20))
+    examples = sm.load_examples(skill_id, limit=limit)
+    return jsonify({"skill_id": skill_id, "count": len(examples), "examples": examples})
+
+
+@app.route("/skills/<skill_id>/examples", methods=["POST"])
+def add_skill_example(skill_id):
+    """
+    添加一条历史评估案例（用于学习）
+    Body: {
+      "requirement": {"module": "", "feature": "", "detail": ""},
+      "pages_features": [...],
+      "worktime": {"role_breakdown": {...}, "total_days": 0, "actual_days": 0, "note": ""}
+    }
+    """
+    from agent import skill_manager as sm
+    example = request.get_json()
+    if not example or not example.get("requirement"):
+        return jsonify({"error": "缺少 requirement 字段"}), 400
+    fpath = sm.add_example(example, skill_id=skill_id)
+    logger.info(f"新增历史案例: skill={skill_id} file={fpath}")
+    return jsonify({"success": True, "file": os.path.basename(fpath)})
+
+
+@app.route("/knowledge/code", methods=["GET"])
+def list_code_knowledge():
+    """列出代码知识库中的文件"""
+    from agent import skill_manager as sm
+    code_dir = sm.CODE_KB_DIR
+    if not os.path.exists(code_dir):
+        return jsonify({"files": [], "hint": "目录不存在，请创建 knowledge/code_knowledge/ 并放入文档"})
+    files = [
+        {"name": f, "size": os.path.getsize(os.path.join(code_dir, f))}
+        for f in sorted(os.listdir(code_dir))
+        if os.path.isfile(os.path.join(code_dir, f)) and not f.startswith(".")
+    ]
+    return jsonify({"files": files, "directory": code_dir})
+
+
 @app.route("/export_evaluation", methods=["POST"])
 def export_evaluation():
     """
@@ -670,4 +814,4 @@ def analyze_requirement():
 
 if __name__ == "__main__":
     logger.info("启动 AI 工时评估助手服务")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True)

@@ -46,17 +46,24 @@ def _set_cached_result(req: Dict, result: Dict):
 
 
 def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
-              model_id: str = None, progress_callback=None) -> str:
+              model_id: str = None, progress_callback=None, skill_id: str = None) -> str:
     """
-    完整工时拆解流程：读取 → 智能评估 → 回填 Excel（G列+N列）
+    完整工时拆解流程：读取 → LangGraph 智能评估（含技能注入）→ 回填 Excel（G列+N列）
 
     progress_callback: fn(current, total, row_num, status, preview, page_count)
     """
+    from agent import skill_manager as sm
+
     rows = reader.read_requirements(filepath)
     if not rows:
         raise ValueError("未找到任何需求行，请检查 Excel 格式和工作表名称")
 
-    kb = KnowledgeLoader().load()
+    # 加载技能配置（整批共享）
+    sid          = skill_id or sm.get_current_skill_id()
+    skill_config = sm.get_skill(sid)
+    examples     = sm.load_examples(sid, limit=3)
+
+    kb    = KnowledgeLoader().load()
     graph = build_graph()
 
     total   = len(rows)
@@ -77,27 +84,46 @@ def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
                 progress_callback(i + 1, total, row_num, "skipped", "（已有内容，跳过）", 0)
             continue
 
-        print(f"[Agent] 开始处理行 {row_num} ({i+1}/{total})", flush=True)
+        print(f"[Agent] 处理行 {row_num} ({i+1}/{total}) skill={sid}", flush=True)
         try:
-            # 使用智能评估模型处理
-            requirement = {
-                "module": row_data.get("module", ""),
+            req = {
+                "module":  row_data.get("module", ""),
                 "feature": row_data.get("feature", ""),
-                "detail": row_data.get("detail", "")
+                "detail":  row_data.get("detail", ""),
             }
-            
-            # 检查缓存
-            cached_result = _get_cached_result(requirement)
+
+            # 缓存检查（缓存 key 包含 skill_id）
+            cache_req = {**req, "_skill": sid}
+            cached_result = _get_cached_result(cache_req)
             if cached_result:
                 logger.info(f"[Agent] 命中缓存: 行 {row_num}")
-                eval_result = cached_result
+                state_out = cached_result
             else:
-                eval_result = evaluate_requirement(requirement, "composite")
-                _set_cached_result(requirement, eval_result)
-            
-            g_text = format_eval_result_for_g_column(eval_result)
-            total_days = eval_result["evaluation"]["effort_days"]
-            page_count = len(eval_result["decomposition"])
+                code_ctx  = sm.load_code_knowledge(
+                    query=f"{req['feature']} {req['detail'][:60]}", limit=2)
+                state_out = graph.invoke({
+                    "raw_requirement":  req,
+                    "model_id":         model_id,
+                    "kb_feature_rules": kb["kb_feature_rules"],
+                    "kb_system_caps":   kb["kb_system_caps"],
+                    "kb_business_docs": kb["kb_business_docs"],
+                    "skill_id":         sid,
+                    "skill_config":     skill_config,
+                    "skill_examples":   examples,
+                    "code_context":     code_ctx,
+                    "pages_features":   [],
+                    "kb_cases":         [],
+                    "g_column_text":    "",
+                    "total_days":       0.0,
+                    "role_breakdown":   {},
+                    "retry_count":      0,
+                    "errors":           [],
+                })
+                _set_cached_result(cache_req, state_out)
+
+            g_text     = state_out.get("g_column_text", "")
+            total_days = state_out.get("total_days", 1.0)
+            page_count = len(state_out.get("pages_features", []))
 
             results.append({
                 "row":           row_num,
@@ -163,63 +189,88 @@ def format_eval_result_for_g_column(eval_result: dict) -> str:
     return "\n".join(result)
 
 
-def run_text(text: str, model_id: str = None, progress_callback=None) -> dict:
+def run_text(text: str, model_id: str = None, progress_callback=None, skill_id: str = None) -> dict:
     """
     处理单条文本需求（不写 Excel）。
     progress_callback: fn(current, total, row_num, status, preview, page_count)
-    返回: {"g_text": str, "total_days": float, "page_count": int}
+    返回: {"g_text": str, "total_days": float, "page_count": int, "role_breakdown": dict}
     """
-    return run_chat(text, model_id=model_id, progress_callback=progress_callback, context="")
+    return run_chat(text, model_id=model_id, progress_callback=progress_callback,
+                    context="", skill_id=skill_id)
 
 
-def run_chat(text: str, model_id: str = None, progress_callback=None, context: str = "") -> dict:
+def run_chat(text: str, model_id: str = None, progress_callback=None,
+             context: str = "", skill_id: str = None) -> dict:
     """
-    处理聊天消息（支持上下文）。
-    context: 历史对话上下文
-    返回: {"g_text": str, "total_days": float, "page_count": int, "is_question": bool}
+    处理聊天消息（支持上下文 + 可切换技能）。
+    - 需求描述过短时返回澄清追问（needs_clarification=True）
+    - 通过 skill_id 注入对应技能的 prompt 规则 + 历史案例 + 代码知识库
+    返回:
+    {
+      "g_text": str,
+      "total_days": float,
+      "page_count": int,
+      "role_breakdown": dict,
+      "pages_features": list,
+      "is_question": bool,
+      "needs_clarification": bool,
+      "clarification_question": str,  # 当 needs_clarification=True 时有值
+    }
     """
+    from agent import skill_manager as sm
+
     text = text.strip()
     if not text:
         raise ValueError("消息内容为空")
 
-    # 判断是否是追问（非需求拆解请求）
+    # ── 追问模式（判断是否是对已有评估结果的追问） ────────────
     is_question = _is_question(text)
-    
     if is_question and context:
-        # 追问模式：直接调用 LLM 回答
         logger.info(f"[Agent-Chat] 追问模式: {text[:40]}")
         response = _answer_question(text, context, model_id)
         return {
-            "g_text": response,
-            "total_days": 0.0,
-            "page_count": 0,
-            "is_question": True,
+            "g_text": response, "total_days": 0.0, "page_count": 0,
+            "role_breakdown": {}, "pages_features": [],
+            "is_question": True, "needs_clarification": False,
+            "clarification_question": "",
         }
 
-    # 需求拆解模式
-    lines = text.split('\n')
-    feature = lines[0].strip()[:80]
+    # ── 拆解需求描述 ─────────────────────────────────────────
+    lines        = text.split('\n')
+    feature      = lines[0].strip()[:80]
     detail_lines = [l for l in lines[1:] if l.strip()]
-    detail = '\n'.join(detail_lines) if detail_lines else text
+    detail       = '\n'.join(detail_lines) if detail_lines else text
 
-    # 如果有上下文，追加到详情中
     if context:
         detail = f"【历史对话】\n{context}\n\n【当前需求】\n{detail}"
 
+    # ── 澄清检查：描述过于简短时返回追问，避免无效评估 ────────
+    raw_detail = '\n'.join(detail_lines) if detail_lines else text
+    if len(raw_detail.strip()) < 15 and len(feature.strip()) < 15:
+        question = f"您提到要做「{feature or text}」，能详细说说具体要实现哪些功能，涉及哪些页面或操作流程吗？"
+        return {
+            "g_text": "", "total_days": 0.0, "page_count": 0,
+            "role_breakdown": {}, "pages_features": [],
+            "is_question": False, "needs_clarification": True,
+            "clarification_question": question,
+        }
+
     req = {
-        "row":        1,
-        "module":     "",
-        "feature":    feature,
-        "detail":     detail,
-        "extra":      "",
-        "existing_g": None,
-        "existing_n": None,
+        "row": 1, "module": "", "feature": feature,
+        "detail": detail, "extra": "",
+        "existing_g": None, "existing_n": None,
     }
+
+    # ── 加载技能配置 + 历史案例 + 代码知识库 ─────────────────
+    sid          = skill_id or sm.get_current_skill_id()
+    skill_config = sm.get_skill(sid)
+    examples     = sm.load_examples(sid, limit=3)
+    code_context = sm.load_code_knowledge(query=f"{feature} {raw_detail[:60]}", limit=2)
+
+    logger.info(f"[Agent-Chat] 需求={feature[:40]} 技能={sid} 历史案例={len(examples)} 代码知识={bool(code_context)}")
 
     kb    = KnowledgeLoader().load()
     graph = build_graph()
-
-    logger.info(f"[Agent-Chat] 处理需求: {feature[:40]}, context_length={len(context)}")
 
     state = graph.invoke({
         "raw_requirement":  req,
@@ -227,22 +278,37 @@ def run_chat(text: str, model_id: str = None, progress_callback=None, context: s
         "kb_feature_rules": kb["kb_feature_rules"],
         "kb_system_caps":   kb["kb_system_caps"],
         "kb_business_docs": kb["kb_business_docs"],
-        "pages_features":   [],
-        "g_column_text":    "",
-        "total_days":       0.0,
-        "retry_count":      0,
-        "errors":           [],
+        # 技能注入
+        "skill_id":       sid,
+        "skill_config":   skill_config,
+        "skill_examples": examples,
+        "code_context":   code_context,
+        # 初始化输出字段
+        "pages_features":  [],
+        "kb_cases":        [],
+        "g_column_text":   "",
+        "total_days":      0.0,
+        "role_breakdown":  {},
+        "retry_count":     0,
+        "errors":          [],
     })
 
-    g_text     = state.get("g_column_text", "")
-    total_days = state.get("total_days", 1.0)
-    page_count = len(state.get("pages_features", []))
+    g_text         = state.get("g_column_text", "")
+    total_days     = state.get("total_days", 1.0)
+    role_breakdown = state.get("role_breakdown", {})
+    pages_features = state.get("pages_features", [])
+    page_count     = len(pages_features)
 
     if progress_callback:
         preview = g_text.split("\n")[0][:60] if g_text else ""
         progress_callback(1, 1, 1, "done", preview, page_count)
 
-        return {"g_text": g_text, "total_days": total_days, "page_count": page_count, "is_question": False}
+    return {
+        "g_text": g_text, "total_days": total_days, "page_count": page_count,
+        "role_breakdown": role_breakdown, "pages_features": pages_features,
+        "is_question": False, "needs_clarification": False,
+        "clarification_question": "",
+    }
 
 
 def _is_question(text: str) -> bool:

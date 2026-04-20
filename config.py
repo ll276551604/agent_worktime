@@ -88,6 +88,12 @@ AVAILABLE_MODELS = [
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     },
     {
+        "id":       "qwen3.5-27b",
+        "label":    "Qwen3.5 27B（阿里云）",
+        "provider": "dashscope",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    },
+    {
         "id":       "qwen3.5-122b-a10b",
         "label":    "Qwen3.5 122B（阿里云）",
         "provider": "dashscope",
@@ -100,7 +106,7 @@ AVAILABLE_MODELS = [
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     },
     {
-        "id":       "gemini-1.5-flash",
+        "id":       "gemini/gemini-1.5-flash",
         "label":    "Gemini 1.5 Flash（Google）",
         "provider": "gemini",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -150,3 +156,8 @@ BUSINESS_KB_DIR = AppConfig.BUSINESS_KB_DIR
 KB_FEATURE_RULES  = os.path.join(AppConfig.KNOWLEDGE_DIR, "rules", "feature_rules.json")
 KB_WORKTIME_RULES = os.path.join(AppConfig.KNOWLEDGE_DIR, "rules", "worktime_rules.json")
 KB_SYSTEM_CAPS    = os.path.join(AppConfig.KNOWLEDGE_DIR, "system_caps.json")
+
+# 技能系统路径
+SKILLS_DIR         = os.path.join(AppConfig.KNOWLEDGE_DIR, "skills")
+EXAMPLES_BASE_DIR  = os.path.join(AppConfig.KNOWLEDGE_DIR, "examples")
+CODE_KB_DIR        = os.path.join(AppConfig.KNOWLEDGE_DIR, "code_knowledge")
