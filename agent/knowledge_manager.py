@@ -61,29 +61,51 @@ class KnowledgeManager:
         return self._load_json_file(KB_WORKTIME_RULES)
     
     def _load_business_docs(self) -> List[Dict]:
-        """加载业务文档知识库"""
+        """加载业务文档知识库（支持 Markdown / JSON / TXT）"""
         from config import BUSINESS_KB_DIR
         docs = []
         if not os.path.exists(BUSINESS_KB_DIR):
             logger.warning(f"业务知识库目录不存在: {BUSINESS_KB_DIR}")
             return docs
-        
-        for fname in os.listdir(BUSINESS_KB_DIR):
+
+        for fname in sorted(os.listdir(BUSINESS_KB_DIR)):
             fpath = os.path.join(BUSINESS_KB_DIR, fname)
             if not os.path.isfile(fpath):
+                continue
+            if not any(fname.endswith(ext) for ext in (".md", ".txt", ".json")):
                 continue
             try:
                 with open(fpath, encoding="utf-8") as f:
                     content = f.read()
-                docs.append({
-                    "name": fname,
-                    "content": content,
-                    "terms": self._extract_terms(content),
-                })
+                docs.append(self._parse_business_doc(fname, content))
                 logger.debug(f"加载业务文档: {fname}")
             except Exception as e:
                 logger.error(f"加载业务文档失败 {fname}: {e}")
         return docs
+
+    def _parse_business_doc(self, fname: str, content: str) -> Dict:
+        """将 Markdown/TXT 文件解析为 match_business_context 所需的结构化格式"""
+        domain = re.sub(r'\.[^.]+$', '', fname)  # 去掉扩展名作为领域名
+
+        # 从 H1/H2 标题提取 subdomain
+        heading_match = re.search(r'^#{1,2}\s+(.+)', content, re.MULTILINE)
+        subdomain = heading_match.group(1).strip() if heading_match else domain
+
+        # 第一段非标题文本作为 digest
+        lines = [l for l in content.splitlines() if l.strip() and not l.startswith('#')]
+        digest = lines[0][:200] if lines else ""
+
+        # 提取匹配关键词：标题词 + 内容高频词
+        match_terms = list(set(self._extract_terms(content)))
+
+        return {
+            "domain":      domain,
+            "subdomain":   subdomain,
+            "recall_when": "",
+            "digest":      digest,
+            "body":        content,
+            "match_terms": match_terms,
+        }
     
     def _load_code_knowledge(self) -> Dict:
         """加载代码知识库（扫描项目结构）"""

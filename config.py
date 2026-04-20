@@ -45,7 +45,12 @@ class AppConfig:
     UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
     OUTPUT_FOLDER = os.path.join(BASE_DIR, "outputs")
     KNOWLEDGE_DIR = os.path.join(BASE_DIR, "knowledge")
-    BUSINESS_KB_DIR = os.path.join(os.path.dirname(BASE_DIR), "业务知识库")
+
+    # 外部知识库路径（从 .env 读取；留空则使用项目内默认目录）
+    BUSINESS_KB_DIR = (os.environ.get("BUSINESS_KB_DIR") or "").strip() \
+                      or os.path.join(BASE_DIR, "knowledge", "business")
+    CODE_KB_EXT_DIR = (os.environ.get("CODE_KB_DIR") or "").strip()      # 外部代码KB（可选追加）
+    JAVA_SOURCE_DIR = (os.environ.get("JAVA_SOURCE_DIR") or "").strip()   # Java源码目录（可选）
     
     # 文件限制
     MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
@@ -151,8 +156,10 @@ MAX_UPLOAD_SIZE = AppConfig.MAX_UPLOAD_SIZE
 MAX_RETRIES = 3
 REQUEST_DELAY = 0.5
 
-KNOWLEDGE_DIR = AppConfig.KNOWLEDGE_DIR
-BUSINESS_KB_DIR = AppConfig.BUSINESS_KB_DIR
+KNOWLEDGE_DIR     = AppConfig.KNOWLEDGE_DIR
+BUSINESS_KB_DIR   = AppConfig.BUSINESS_KB_DIR
+CODE_KB_EXT_DIR   = AppConfig.CODE_KB_EXT_DIR
+JAVA_SOURCE_DIR   = AppConfig.JAVA_SOURCE_DIR
 KB_FEATURE_RULES  = os.path.join(AppConfig.KNOWLEDGE_DIR, "rules", "feature_rules.json")
 KB_WORKTIME_RULES = os.path.join(AppConfig.KNOWLEDGE_DIR, "rules", "worktime_rules.json")
 KB_SYSTEM_CAPS    = os.path.join(AppConfig.KNOWLEDGE_DIR, "system_caps.json")

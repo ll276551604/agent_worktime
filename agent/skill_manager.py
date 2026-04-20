@@ -252,36 +252,56 @@ def search_kb_cases(query: str = "", skill_id: Optional[str] = None, limit: int 
 
 def load_code_knowledge(query: str = "", limit: int = 3) -> str:
     """
-    从代码知识库检索相关片段（关键词相关性匹配）。
-    存储位置：knowledge/code_knowledge/*.md / *.txt / *.json
-    用于向 LLM 注入已有代码结构 / 接口 / 数据模型信息。
+    从代码知识库检索相关片段，来源优先级：
+      1. 内置代码知识库（knowledge/code_knowledge/）
+      2. 外部代码知识库（.env CODE_KB_DIR，Markdown/TXT/JSON）
+      3. Java 源码自动扫描（.env JAVA_SOURCE_DIR，提取接口+实体+服务）
+    返回拼接的 Markdown 文本，注入 LLM prompt。
     """
-    if not os.path.exists(CODE_KB_DIR):
-        return ""
+    from config import AppConfig
 
     query_terms = [t.lower() for t in query.split() if len(t) >= 2][:10]
     candidates: List[tuple] = []
 
-    for fname in os.listdir(CODE_KB_DIR):
-        fpath = os.path.join(CODE_KB_DIR, fname)
-        if not os.path.isfile(fpath):
+    # ── 1 & 2：扫描 Markdown/TXT/JSON 知识库文件 ─────────────────────
+    scan_dirs = [CODE_KB_DIR]
+    ext_dir = (AppConfig.CODE_KB_EXT_DIR or "").strip()
+    if ext_dir and os.path.isdir(ext_dir) and ext_dir != CODE_KB_DIR:
+        scan_dirs.append(ext_dir)
+
+    for kb_dir in scan_dirs:
+        if not os.path.isdir(kb_dir):
             continue
-        if not any(fname.endswith(ext) for ext in (".md", ".txt", ".json")):
-            continue
-        try:
-            with open(fpath, encoding="utf-8") as f:
-                content = f.read()
-            score = sum(1 for t in query_terms if t in content.lower()) if query_terms else 0
-            candidates.append((score, fname, content))
-        except Exception as e:
-            logger.warning(f"读取代码知识库失败: {fname} - {e}")
+        for fname in os.listdir(kb_dir):
+            fpath = os.path.join(kb_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if not any(fname.endswith(ext) for ext in (".md", ".txt", ".json")):
+                continue
+            try:
+                with open(fpath, encoding="utf-8") as f:
+                    content = f.read()
+                score = sum(1 for t in query_terms if t in content.lower()) if query_terms else 0
+                candidates.append((score, fname, content[:1200]))
+            except Exception as e:
+                logger.warning(f"读取代码知识库失败: {fname} - {e}")
 
     candidates.sort(key=lambda x: x[0], reverse=True)
-
     results = []
     for score, fname, content in candidates[:limit]:
         if score > 0 or not query_terms:
-            results.append(f"### {fname}\n{content[:800]}")
+            results.append(f"### {fname}\n{content}")
+
+    # ── 3：Java 源码自动扫描 ─────────────────────────────────────────
+    java_dir = (AppConfig.JAVA_SOURCE_DIR or "").strip()
+    if java_dir and os.path.isdir(java_dir):
+        try:
+            from agent.java_scanner import scan_java_source
+            java_summary = scan_java_source(java_dir)
+            if java_summary:
+                results.append(java_summary)
+        except Exception as e:
+            logger.warning(f"Java 源码扫描失败: {e}")
 
     return "\n\n".join(results)
 
