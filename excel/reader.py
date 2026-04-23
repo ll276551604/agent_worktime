@@ -20,10 +20,31 @@ def read_requirements(filepath: str) -> list:
     """
     wb = openpyxl.load_workbook(filepath)
 
-    if SHEET_NAME not in wb.sheetnames:
-        raise ValueError(f"工作表 '{SHEET_NAME}' 不存在，可用工作表：{wb.sheetnames}")
+    # 支持的工作表名称列表（按优先级排序）
+    supported_sheet_names = [
+        SHEET_NAME,
+        "需求拆解评估",
+        "工时评估表AI版本",
+        "工时评估表",
+        "需求清单",
+        "需求列表",
+        "需求",
+        "Sheet1",
+    ]
 
-    ws = wb[SHEET_NAME]
+    # 查找可用的工作表
+    ws = None
+    for name in supported_sheet_names:
+        if name in wb.sheetnames:
+            ws = wb[name]
+            break
+    
+    # 如果没有找到预定义的工作表，使用第一个工作表
+    if ws is None and wb.sheetnames:
+        ws = wb[wb.sheetnames[0]]
+    elif ws is None:
+        raise ValueError("Excel 文件中没有找到任何工作表")
+
     max_row = ws.max_row
 
     # 处理合并单元格：向下填充 A 列（功能模块）

@@ -5,11 +5,15 @@
 ## 核心能力
 
 - **知识库驱动**：内置 57 条 B 端履约中台历史案例，每次评估自动召回最相似的 1~3 条作为参照基准
+- **智能需求识别**：强制读取业务知识库和代码知识库，自动判断新增/调整需求类型
+- **需求类型确认**：识别需求类型后先询问用户确认，确认后再进行拆解评估
+- **智能追问机制**：基于 AI 理解动态生成追问问题，而非预设固定问题
 - **3 步评估流程**：知识库检索 → 功能点拆解（含开发类型分类）→ 四端工时估算
 - **四端分角色输出**：产品 / 前端 / 后端 / 测试，后端工时 × 0.35 自动计算测试工时
 - **S/M/L/XL/XXL 分级规则**：每个角色独立的五档工时标准，含复杂度加分项
 - **置信度标注**：有参照案例正常输出，类似场景推算标注 ⚠️，全新领域标注 ❓
 - **Excel 批量处理**：上传需求清单 Excel，批量评估并回填结果
+- **智能导入流程**：自动检测已填写内容，询问用户是否覆盖
 - **多技能体系**：支持切换评估技能（B端履约中台 / 标准产品 / 敏捷故事点）
 - **多轮对话**：支持追问和上下文记忆
 
@@ -42,12 +46,27 @@ DASHSCOPE_API_KEY=your_dashscope_key
 
 ### 对话评估
 
-在输入框直接描述需求，系统会自动走 3 步评估流程。需求描述越完整，评估结果越准确。
+在输入框直接描述需求，系统会：
+1. 自动读取知识库进行需求类型判断（新增/调整）
+2. 显示识别结果并询问用户确认
+3. 用户确认后进入正式评估流程
 
 **输入示例：**
 > 新增经销商账期预警功能：当应收账款超过账期时自动触发预警，支持预警规则可配置（阈值、触发条件）；向销售员发送企业微信消息；提供预警记录查询页面，支持导出。
 
-**输出示例：**
+**确认阶段输出：**
+```
+根据您的需求描述，结合知识库分析，我识别到：
+
+【需求描述】新增经销商账期预警功能...
+【业务模块】订单管理
+【需求类型】新增功能
+【分析来源】基于业务知识库和代码知识库分析
+
+请问以上识别是否正确？如果不正确，请告诉我正确的模块和类型~
+```
+
+**评估输出示例：**
 ```
 【参照案例】
 通知-09 | 经销商余额不足短信预警 | 新增 | 产品0.5天 前端0天 后端2天 测试0.5天 合计3天
@@ -71,9 +90,24 @@ DASHSCOPE_API_KEY=your_dashscope_key
 
 ### Excel 批量处理
 
-1. 准备 `.xlsx` 文件，Sheet 名为 `需求清单`，包含「模块」「功能点」「需求描述」列
+1. 准备 `.xlsx` 文件，支持多种工作表名称（需求清单、需求拆解评估、工时评估表AI版本等）
 2. 点击上传按钮选择文件
-3. 等待批量评估完成，下载回填结果
+3. 系统自动检测已填写内容并询问是否覆盖
+4. 等待批量评估完成，下载回填结果
+
+**智能导入流程：**
+```
+上传文件 → 检测已填写内容 → 询问是否覆盖（覆盖/跳过）→ 开始评估
+```
+
+**支持的工作表名称：**
+- 需求清单
+- 需求拆解评估
+- 工时评估表AI版本
+- 工时评估表
+- 需求列表
+- 需求
+- Sheet1
 
 ## 项目结构
 
@@ -82,30 +116,44 @@ agent_worktime/
 ├── agent/
 │   ├── nodes/
 │   │   ├── feature_rebuilder.py   # 节点1：需求拆解（含知识库检索）
-│   │   └── worktime_estimator.py  # 节点2：工时估算（S/M/L/XL/XXL）
+│   │   ├── reviewer.py            # 节点2：评估结果审核
+│   │   └── worktime_estimator.py  # 节点3：工时估算（S/M/L/XL/XXL）
+│   ├── __init__.py
+│   ├── dialog_manager.py          # 对话管理（意图识别、状态追踪）
+│   ├── evaluation_models.py       # 评估数据模型
+│   ├── gemini_client.py           # LLM 调用封装
 │   ├── graph.py                   # LangGraph 状态图定义
+│   ├── java_scanner.py            # Java 代码扫描工具
+│   ├── kb_utils.py                # 知识库工具函数
+│   ├── knowledge_manager.py       # 知识库管理
+│   ├── session_manager.py         # 会话管理
 │   ├── skill_manager.py           # 技能管理（加载/切换/案例检索）
-│   ├── worktime_agent.py          # 主评估入口
-│   ├── dialog_manager.py          # 对话引导管理
-│   └── gemini_client.py           # LLM 调用封装
+│   └── worktime_agent.py          # 主评估入口
 ├── knowledge/
 │   ├── b_end_fulfillment/
 │   │   └── kb_cases.json          # 57 条 B 端履约中台历史案例
+│   ├── business/                  # 业务领域知识
+│   ├── code_knowledge/            # 代码知识库
 │   ├── examples/                  # 各技能 few-shot 案例
-│   │   ├── standard/
-│   │   └── b_end_fulfillment/
+│   │   └── standard/
+│   ├── rules/
+│   │   ├── feature_rules.json     # 功能点拆解规则
+│   │   └── worktime_rules.json    # 工时评估规则
 │   ├── skills/
+│   │   ├── agile.json             # 敏捷故事点技能配置
 │   │   ├── b_end_fulfillment.json # B 端履约中台技能配置
-│   │   ├── standard.json          # 标准产品评估技能配置
-│   │   └── agile.json             # 敏捷故事点技能配置
+│   │   └── standard.json          # 标准产品评估技能配置
 │   └── system_caps.json           # 系统已有能力描述
 ├── prompts/
-│   └── guiding_prompt.txt         # 引导对话 prompt（B 端履约中台专属）
+│   └── guiding_prompt.txt         # 引导对话 prompt
 ├── excel/
+│   ├── __init__.py
 │   ├── reader.py                  # Excel 读取
 │   └── writer.py                  # Excel 回填写入
 ├── templates/
 │   └── index.html                 # 前端页面
+├── docs/                          # 文档目录
+├── tests/                         # 测试目录
 ├── app.py                         # Flask 应用入口
 ├── config.py                      # 配置（模型、路径、超时等）
 ├── start.sh                       # 一键启动脚本
@@ -159,9 +207,33 @@ agent_worktime/
 ## API 接口
 
 ### 对话评估
+
+**标准接口**
 ```
 POST /chat
 Body: { "message": "需求描述", "session_id": "xxx", "skill_id": "b_end_fulfillment" }
+Response: {
+  "success": true,
+  "output": {
+    "type": "text|evaluation|thinking|error",
+    "content": "..."
+  },
+  "meta": {
+    "intent": "chat|new_task|revise_task",
+    "stage": "chat|collecting|assessment|reassessment"
+  }
+}
+```
+
+**流式接口（推荐）**
+```
+POST /chat/stream
+Body: { "message": "需求描述", "session_id": "xxx" }
+Response: Server-Sent Events
+  - type: intent    # 意图识别结果
+  - type: thinking  # 思考状态（逐步加载）
+  - type: complete  # 完成结果
+  - type: error     # 错误信息
 ```
 
 ### Excel 批量评估
@@ -178,6 +250,11 @@ POST /skills/switch             # 切换技能 { "skill_id": "xxx" }
 GET  /skills/<id>               # 获取技能详情
 GET  /skills/<id>/examples      # 获取历史案例
 POST /skills/<id>/examples      # 新增历史案例（用于积累团队经验数据）
+```
+
+### 评估接口
+```
+POST /evaluate        # 直接评估需求（跳过对话引导）
 ```
 
 ## 技能体系

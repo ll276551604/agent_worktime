@@ -33,6 +33,7 @@ class ChatSession:
         self.created_at = time.time()
         self.last_active = time.time()
         self.metadata: Dict = {}  # 存储额外信息如当前处理的文件ID等
+        self.last_evaluation: Dict = {}  # 存储上次评估结果，用于反馈重新评估
 
     def add_message(self, role: str, content: str) -> ChatMessage:
         """添加消息"""
@@ -62,6 +63,14 @@ class ChatSession:
             context_lines.append(f"{role}: {msg['content']}")
         
         return "\n".join(context_lines)
+
+    def get_last_evaluation(self) -> Dict:
+        """获取上次评估结果"""
+        return self.last_evaluation
+
+    def set_last_evaluation(self, evaluation: Dict):
+        """设置上次评估结果"""
+        self.last_evaluation = evaluation
 
     def is_expired(self, timeout_hours: int = 2) -> bool:
         """检查会话是否过期"""

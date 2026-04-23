@@ -83,22 +83,64 @@ class DialogManager:
 </ASSESSMENT_READY>
 """
     
-    def analyze_intent(self, user_input: str) -> str:
-        """分析用户意图"""
+    def analyze_intent(self, user_input: str, has_history: bool = False, has_evaluation: bool = False) -> str:
+        """
+        分析用户意图，输出固定JSON格式
+        :param user_input: 用户输入
+        :param has_history: 是否有历史对话
+        :param has_evaluation: 是否有评估结果
+        :return: JSON字符串 {"intent":"", "reason":""}
+        """
+        import json
+        
         user_input = user_input.lower().strip()
         
-        # 识别评估需求意图
-        eval_keywords = ['评估', '工时', '估算', '需求', '功能', '开发', '工作量', '拆解']
-        if any(keyword in user_input for keyword in eval_keywords):
-            return 'evaluation'
+        # 1. 识别 chat 意图（闲聊、问候、提问Agent本身、无关业务沟通、规则咨询、日常对话）
+        chat_keywords = [
+            # 问候类
+            '你好', 'hello', 'hi', '您好', '早上好', '晚上好', '下午好', '嗨',
+            '你好啊', '哈喽', '嘿', '嗨喽',
+            # 感谢告别类
+            '谢谢', '谢谢了', '感谢', '拜拜', '再见', '再见了', '回见',
+            # 关于Agent本身
+            '你是谁', '你叫什么', '你能做什么', '你的功能', '介绍一下',
+            '规则', '说明', '帮助', '使用方法', '怎么用', '什么是',
+            # 无关业务
+            '天气', '吃饭', '今天', '周末', '放假',
+        ]
         
-        # 识别问题意图
-        question_keywords = ['什么', '怎么', '如何', '为什么', '哪个', '吗', '?', '？']
-        if any(keyword in user_input for keyword in question_keywords):
-            return 'question'
+        if any(keyword in user_input for keyword in chat_keywords):
+            return json.dumps({
+                "intent": "chat",
+                "reason": "识别到闲聊、问候、规则咨询或无关业务内容"
+            })
         
-        # 默认视为评估需求
-        return 'evaluation'
+        # 2. 识别 revise_task 意图（纠错、补充信息、指出拆解错误、追加背景、修正需求边界、调整原有系统信息）
+        revise_keywords = [
+            # 纠错类
+            '不对', '错了', '错误', '有问题', '不准确', '不合理',
+            # 补充类
+            '补充', '追加', '还有', '另外', '加上', '新增', '添加',
+            # 调整类
+            '调整', '修改', '更改', '修正', '变更', '重算', '重新',
+            # 质疑类
+            '质疑', '反驳', '不同意', '不是这样',
+            # 背景追加
+            '背景', '原有', '之前', '原来', '历史',
+        ]
+        
+        # 如果有历史对话或评估结果，且消息匹配修订关键词，则判定为 revise_task
+        if (has_history or has_evaluation) and any(keyword in user_input for keyword in revise_keywords):
+            return json.dumps({
+                "intent": "revise_task",
+                "reason": "存在历史对话/评估结果，且识别到纠错、补充或调整相关内容"
+            })
+        
+        # 3. 默认识别为 new_task（全新需求拆解任务）
+        return json.dumps({
+            "intent": "new_task",
+            "reason": "识别到需求拆解或工时评估相关内容，或无历史对话时的首次输入"
+        })
     
     def _init_knowledge_manager(self):
         """延迟初始化知识库管理器"""
@@ -107,17 +149,19 @@ class DialogManager:
             self.knowledge_manager = KnowledgeManager()
     
     def _analyze_from_knowledge_base(self, requirement_text: str) -> Dict:
-        """通过知识库智能分析需求，识别模块和需求类型"""
+        """通过知识库智能分析需求，识别模块和需求类型（强制读取业务知识库和代码知识库）"""
         self._init_knowledge_manager()
         
         result = {
             'module': '',
             'type': '',
-            'confidence': 0.0
+            'confidence': 0.0,
+            'related_features': [],
+            'related_modules': []
         }
         
         try:
-            # 调用知识库进行分析
+            # 调用知识库进行分析（强制读取业务知识库和代码知识库）
             requirement = {
                 "feature": requirement_text,
                 "detail": requirement_text,
@@ -128,6 +172,7 @@ class DialogManager:
             # 从分析结果中提取模块信息
             if analysis.get('related_modules'):
                 result['module'] = analysis['related_modules'][0]
+                result['related_modules'] = analysis['related_modules']
             
             # 根据知识库判断需求类型（新增/调整）
             if analysis.get('judgment'):
@@ -135,6 +180,10 @@ class DialogManager:
                     result['type'] = '新增功能'
                 else:
                     result['type'] = '调整优化'
+            
+            # 返回关联的现有功能（用于调整需求的拆解参考）
+            if analysis.get('existing_features'):
+                result['related_features'] = analysis['existing_features']
             
             result['confidence'] = analysis.get('confidence', 0.0)
             
@@ -228,15 +277,18 @@ class DialogManager:
         return False
     
     def extract_requirement_info(self, conversation_history: List[Dict]) -> Dict[str, str]:
-        """从对话历史中提取需求信息（结合知识库智能分析）"""
+        """从对话历史中提取需求信息（强制结合知识库智能分析）"""
         info = {
             'requirement': '',
             'module': '',
             'type': '',
+            'type_confirmed': False,
             'auto_detected': {
                 'module': False,
                 'type': False
-            }
+            },
+            'kb_analysis': None,  # 新增：知识库分析结果
+            'related_features': [],  # 新增：关联的现有功能
         }
         
         # 收集所有用户消息
@@ -257,33 +309,72 @@ class DialogManager:
         if not requirement_text:
             return info
         
-        # ============== 第一步：规则匹配识别（优先级最高）==============
+        # ============== 检查用户是否确认（识别确认关键词）==============
+        # 获取最后一条用户消息（用于判断是否是确认回复）
+        last_user_msg = user_messages[-1] if user_messages else ''
         
-        # 尝试提取模块信息
-        module_from_rule = self._extract_module_by_keyword(requirement_text)
-        if module_from_rule:
-            info['module'] = module_from_rule
-            info['auto_detected']['module'] = True
+        # 确认关键词
+        confirm_keywords = ['对', '是的', '正确', '确认', '没错', '好的', '可以', 'ok', '嗯']
+        deny_keywords = ['不对', '不是', '错了', '错误', '不正确', '重新']
         
-        # 尝试提取需求类型
-        type_from_rule = self._extract_type_by_keyword(requirement_text)
-        if type_from_rule:
-            info['type'] = type_from_rule
-            info['auto_detected']['type'] = True
+        # 判断是否是确认回复
+        is_confirm = any(keyword in last_user_msg for keyword in confirm_keywords)
+        is_deny = any(keyword in last_user_msg for keyword in deny_keywords)
         
-        # ============== 第二步：如果规则匹配未能识别，使用知识库分析 ==============
+        # 如果是确认，设置确认状态
+        if is_confirm and not is_deny:
+            info['type_confirmed'] = True
         
-        if (not info['module'] or not info['type']):
-            kb_result = self._analyze_from_knowledge_base(requirement_text)
-            
-            # 如果知识库分析有较高置信度（>=0.6），使用分析结果
-            if kb_result['confidence'] >= 0.6:
-                if kb_result['module'] and not info['module']:
-                    info['module'] = kb_result['module']
-                    info['auto_detected']['module'] = True
-                if kb_result['type'] and not info['type']:
-                    info['type'] = kb_result['type']
-                    info['auto_detected']['type'] = True
+        # ============== 强制：第一步读取知识库并分析 ==============
+        kb_analysis = self._analyze_from_knowledge_base(requirement_text)
+        info['kb_analysis'] = kb_analysis
+        
+        # 使用知识库分析结果（强制使用，置信度>=0.5即可）
+        if kb_analysis['confidence'] >= 0.5:
+            if kb_analysis['module']:
+                info['module'] = kb_analysis['module']
+                info['auto_detected']['module'] = True
+            if kb_analysis['type']:
+                info['type'] = kb_analysis['type']
+                info['auto_detected']['type'] = True
+            if kb_analysis.get('related_features'):
+                info['related_features'] = kb_analysis['related_features']
+        
+        # ============== 第二步：规则匹配识别（作为知识库分析的补充）==============
+        
+        # 如果知识库未能识别模块，尝试规则匹配
+        if not info['module']:
+            module_from_rule = self._extract_module_by_keyword(requirement_text)
+            if module_from_rule:
+                info['module'] = module_from_rule
+                info['auto_detected']['module'] = True
+        
+        # 如果知识库未能识别类型，尝试规则匹配
+        if not info['type']:
+            type_from_rule = self._extract_type_by_keyword(requirement_text)
+            if type_from_rule:
+                info['type'] = type_from_rule
+                info['auto_detected']['type'] = True
+        
+        # ============== 第三步：兜底处理（确保有默认值）==============
+        
+        # 如果模块仍未识别，使用默认值
+        if not info['module']:
+            info['module'] = '未指定模块'
+            info['auto_detected']['module'] = False
+        
+        # 如果类型仍未识别，默认视为新增功能
+        if not info['type']:
+            info['type'] = '新增功能'
+            info['auto_detected']['type'] = False
+        
+        # 如果用户否认，清空已识别的信息，等待重新输入
+        if is_deny:
+            info['module'] = ''
+            info['type'] = ''
+            info['type_confirmed'] = False
+            info['kb_analysis'] = None
+            info['related_features'] = []
         
         return info
     
@@ -329,6 +420,51 @@ class DialogManager:
         
         # 信息完整，返回None表示可以直接评估
         return None
+    
+    def generate_intelligent_question(self, info: Dict) -> str:
+        """
+        基于AI理解生成智能追问问题，而不是使用预设问题
+        :param info: 已收集的需求信息
+        :return: 智能生成的追问问题
+        """
+        requirement = info.get('requirement', '').strip()
+        module = info.get('module', '').strip()
+        req_type = info.get('type', '').strip()
+        
+        # 如果需求描述较短，请求更多细节
+        if len(requirement) < 10:
+            return f"您的需求描述比较简洁，能再详细描述一下吗？比如具体要实现什么功能、涉及哪些业务场景~"
+        
+        # 如果模块未识别，基于需求内容智能提问
+        if not module:
+            # 分析需求中提到的关键词，生成针对性问题
+            keywords = ['订单', '用户', '商品', '支付', '报表', '权限', '消息', '通知']
+            found_keywords = [k for k in keywords if k in requirement]
+            
+            if found_keywords:
+                return f"根据您的描述，我注意到涉及{'、'.join(found_keywords)}等内容。请问这个需求主要属于哪个业务模块呢？（如：订单管理、用户管理、商品管理等）"
+            else:
+                return f"为了更好地拆解您的需求，我想了解一下：这个需求主要涉及哪个业务模块呢？例如订单管理、用户管理、商品管理等~"
+        
+        # 如果类型未识别，基于需求内容智能提问
+        if not req_type:
+            # 分析关键词判断可能的类型
+            has_new_keywords = any(k in requirement for k in ['新增', '开发', '实现', '创建', '搭建'])
+            has_modify_keywords = any(k in requirement for k in ['修改', '优化', '调整', '改进', '升级'])
+            has_fix_keywords = any(k in requirement for k in ['修复', 'bug', '问题', '错误', '解决'])
+            
+            if has_new_keywords and not has_modify_keywords and not has_fix_keywords:
+                return f"根据您描述的「{requirement[:50]}...」，看起来像是一个新增功能需求，对吗？如果不是，请告诉我具体是调整优化还是Bug修复~"
+            elif has_modify_keywords:
+                return f"根据您描述的「{requirement[:50]}...」，看起来像是一个调整优化需求，对吗？如果不是，请告诉我具体的需求类型~"
+            elif has_fix_keywords:
+                return f"根据您描述的「{requirement[:50]}...」，看起来像是一个Bug修复需求，对吗？如果不是，请告诉我具体的需求类型~"
+            else:
+                # 如果无法判断，使用通用但智能的提问
+                return f"为了更准确地评估工时，我想确认一下：您描述的「{requirement[:50]}...」是新增功能、调整优化还是Bug修复呢？"
+        
+        # 默认追问
+        return f"为了更好地帮您拆解需求，您能再补充一些信息吗？比如具体的业务场景或功能细节~"
     
     def build_prompt(self, conversation_history: List[Dict]) -> str:
         """构建完整的对话提示词"""

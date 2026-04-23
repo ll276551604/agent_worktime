@@ -63,6 +63,36 @@ app.config['TIMEOUT'] = 300  # 5分钟超时
 
 
 # ============================================================
+# 统一响应格式
+# ============================================================
+def make_response(output_type, content, intent=None, stage=None, session_id=None, meta=None):
+    """
+    统一响应格式生成器
+    :param output_type: 输出类型: text | evaluation | thinking | error
+    :param content: 内容
+    :param intent: 意图
+    :param stage: 阶段
+    :param session_id: 会话ID
+    :param meta: 额外元数据
+    """
+    response = {
+        "success": output_type != "error",
+        "output": {
+            "type": output_type,
+            "content": content
+        },
+        "meta": {
+            "intent": intent,
+            "stage": stage,
+            "session_id": session_id
+        }
+    }
+    if meta:
+        response["meta"].update(meta)
+    return jsonify(response)
+
+
+# ============================================================
 # 全局异常处理
 # ============================================================
 @app.errorhandler(Exception)
@@ -192,19 +222,20 @@ def delete_session(session_id):
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """聊天接口 — LangGraph 智能拆解 + 可切换技能 + 按角色工时输出"""
+    """聊天接口 — 产品需求拆解&工时评估专用工作流Agent"""
     from agent.session_manager import SessionManager
     from agent.dialog_manager import DialogManager
     from agent import skill_manager as sm
+    import json
 
     session_mgr = SessionManager()
     dm          = DialogManager()
     data        = request.get_json()
 
-    session_id = data.get("session_id")
-    message    = (data.get("message") or "").strip()
-    model_id   = data.get("model_id", DEFAULT_MODEL)
-    skill_id   = data.get("skill_id") or sm.get_current_skill_id()
+    session_id       = data.get("session_id")
+    message         = (data.get("message") or "").strip()
+    model_id        = data.get("model_id", DEFAULT_MODEL)
+    skill_id        = data.get("skill_id") or sm.get_current_skill_id()
 
     if not message:
         return jsonify({"error": "消息内容为空"}), 400
@@ -216,86 +247,280 @@ def chat():
         session = session_mgr.create_session()
         session_id = session.session_id
 
+    # 获取历史对话和评估结果（用于意图识别）
+    conversation_history = session.get_messages()
+    last_evaluation = session.get_last_evaluation()
+    has_history = len(conversation_history) > 0
+    has_evaluation = bool(last_evaluation)
+
+    # ── 强制第一步：全局意图识别（所有用户输入，永远优先执行） ──
+    intent_result = dm.analyze_intent(message, has_history, has_evaluation)
+    intent_data = json.loads(intent_result)
+    intent = intent_data["intent"]
+    intent_reason = intent_data["reason"]
+    
+    logger.info(f"意图识别结果: session={session_id} intent={intent} reason={intent_reason}")
+
+    # 添加用户消息到会话
     session.add_message("user", message)
     conversation_history = session.get_messages()
-    logger.info(f"聊天请求: session={session_id} skill={skill_id} msg_len={len(message)}")
 
-    intent = dm.analyze_intent(message)
-    process_log = [f"意图分析：{intent}"]
-
-    # ── 提取需求信息（模块/类型自动识别） ───────────────────
-    info           = dm.extract_requirement_info(conversation_history)
-    is_complete    = dm.check_info_complete(info)
-    auto_detected  = {
-        "module_detected": bool(info.get("auto_detected", {}).get("module")),
-        "type_detected":   bool(info.get("auto_detected", {}).get("type")),
-    }
-
-    if not is_complete:
-        if not info.get('requirement'):
-            process_log.append("未识别到有效需求描述，进入引导输入")
+    # ── 1. intent = chat（闲聊） ────────────────────────────
+    if intent == "chat":
+        # 纠正性闲聊回复 - 简洁引导用户回到业务主题
+        chat_responses = {
+            "你好": "您好！我是产品需求拆解&工时评估专用Agent 😊\n\n请直接描述您的产品需求，我会帮您拆解并评估工时。\n\n示例：开发一个用户登录功能",
+            "hello": "Hello! I'm a dedicated Agent for product requirement breakdown and worktime estimation. 😊\n\nPlease describe your product requirement directly.\n\nExample: Develop a user login feature",
+            "hi": "Hi! 😊 我是产品需求拆解&工时评估专用Agent。\n\n请直接描述您的产品需求，我会帮您拆解评估。\n\n示例：开发一个订单管理模块",
+            "您好": "您好！我是产品需求拆解&工时评估专用Agent 😊\n\n请直接描述您的产品需求，我会帮您拆解评估。\n\n示例：实现报表系统的数据可视化功能",
+            "早上好": "早上好！🌞\n\n我是产品需求拆解&工时评估专用Agent。请直接描述您的产品需求。\n\n示例：开发用户注册功能",
+            "晚上好": "晚上好！🌙\n\n我是产品需求拆解&工时评估专用Agent。请直接描述您的产品需求。\n\n示例：优化订单列表页面性能",
+            "下午好": "下午好！😊\n\n我是产品需求拆解&工时评估专用Agent。请直接描述您的产品需求。\n\n示例：开发商品管理后台",
+            "谢谢": "不客气！😊\n\n如果您有产品需求拆解或工时评估的需求，随时可以找我。",
+            "谢谢了": "不客气！😊\n\n如果您有产品需求需要评估，随时可以回来找我。",
+            "感谢": "不客气！很高兴能帮到您。😊",
+            "拜拜": "再见！👋\n\n如果您有产品需求拆解或工时评估的需求，欢迎随时回来。",
+            "再见": "再见！👋\n\n如果您有产品需求需要评估，欢迎随时回来。",
+            "你是谁": "我是产品需求拆解&工时评估专用Agent！🤖\n\n我的核心能力：\n• 需求分析与拆解\n• 工时评估与核算\n• 支持多轮迭代调整\n\n请直接描述您的产品需求，我会帮您评估！",
+            "你叫什么": "我是产品需求拆解&工时评估专用Agent！😊\n\n请直接描述您的产品需求，我会帮您拆解评估。",
+            "你能做什么": "我可以帮您：🤝\n\n1. **需求拆解**：将产品需求拆分成具体功能模块\n2. **工时评估**：套用官方工时评估标准核算工时\n3. **多轮迭代**：支持补充订正后重新评估\n\n请直接描述您的产品需求！",
+            "你的功能": "我的主要功能是产品需求拆解和工时评估！📊\n\n核心能力：\n• 智能识别需求类型\n• 全量结构化拆解\n• 工时核算评估\n• 支持多轮调整\n\n请直接描述您的产品需求！",
+            "介绍一下": "我是产品需求拆解&工时评估专用Agent！🤖\n\n我能帮您拆解产品需求并评估工时，支持多轮迭代调整。\n\n请直接描述您的产品需求！",
+            "规则": "我会按照以下规则评估：📋\n\n1. 已有功能=调整需求，新能力=新增需求\n2. 按模块、页面、功能点结构化拆解\n3. 套用官方工时评估标尺核算\n4. 支持补充纠错后全流程重算\n\n请直接描述您的产品需求！",
+            "说明": "我会：📝\n\n1. 识别需求类型（新增/调整/混合）\n2. 全量结构化拆解需求\n3. 核算工时评估\n\n请直接描述您的产品需求！",
+            "帮助": "当然可以！🙋\n\n您可以直接描述产品需求，我会帮您拆解和评估。\n\n如果需要调整，随时补充说明即可重新评估。",
+            "使用方法": "使用方法：💡\n\n1. 输入需求 → 2. 查看评估 → 3. 调整优化\n\n请直接描述您的产品需求！\n\n示例：开发一个用户登录功能",
+            "怎么用": "直接输入产品需求即可！💡\n\n示例：\n• 开发订单管理模块\n• 修复首页加载缓慢问题\n• 优化用户注册流程",
+            "什么是": "📚\n\n**需求拆解**：将产品需求拆分成具体功能模块、页面、接口等\n**工时评估**：根据拆解结果核算开发所需时间\n\n请直接描述您的产品需求，我会帮您评估！",
+        }
+        
+        # 查找匹配的回复，如果没有匹配则给出通用回复
+        base_reply = chat_responses.get(message, None)
+        if base_reply:
+            reply = base_reply
         else:
-            process_log.append("检测到需求信息不完整，准备追问补充")
-            if not info.get('module'):
-                process_log.append("模块未识别")
-            if not info.get('type'):
-                process_log.append("需求类型未识别")
-
-        reply = dm.get_next_question(info) or "请继续描述您的需求内容，我会帮您补全模块和类型。"
+            # 对于未匹配的闲聊内容，给出纠正性引导
+            reply = f"不好意思，我是产品需求拆解&工时评估专用Agent，主要专注于产品需求拆解和工时评估工作。😊\n\n温馨提示：如果您有产品需求需要评估，请直接描述您的需求，例如：\n「开发一个用户登录功能」\n\n请问有什么需求需要我帮忙拆解评估吗？"
+        
         session.add_message("assistant", reply)
-        return jsonify({"success": True, "session_id": session_id,
-                        "stage": "collecting", "message": reply,
-                        "collected_info": info, "auto_detected": auto_detected,
-                        "process": process_log})
-
-    # ── 拼装完整需求文本（含模块+类型上下文） ───────────────
-    full_text = f"【模块】{info['module']} 【类型】{info['type']} 【描述】{info['requirement']}"
-    process_log.append(f"提取到需求：{info['requirement'][:80]}")
-    if info.get('module'):
-        process_log.append(f"模块识别：{info['module']} ({'自动' if auto_detected['module_detected'] else '默认'})")
-    else:
-        process_log.append("模块未识别，使用默认模块")
-    if info.get('type'):
-        process_log.append(f"需求类型识别：{info['type']} ({'自动' if auto_detected['type_detected'] else '默认'})")
-    else:
-        process_log.append("需求类型未识别，默认视为新增功能")
-    process_log.append("开始执行需求拆解与工时评估")
-
-    # ── 获取历史对话上下文（最近 3 轮）──────────────────────
-    history_ctx = ""
-    msgs = conversation_history[:-1]  # 排除刚加入的本条
-    if msgs:
-        recent = msgs[-6:]
-        history_ctx = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in recent)
-
-    try:
-        result = worktime_agent.run_chat(
-            text=full_text,
-            model_id=model_id,
-            context=history_ctx,
-            skill_id=skill_id,
+        return make_response(
+            output_type="text",
+            content=reply,
+            intent=intent,
+            stage="chat",
+            session_id=session_id,
+            meta={
+                "intent_reason": intent_reason,
+                "process": [f"意图识别：chat - {intent_reason}"]
+            }
         )
-    except Exception as e:
-        logger.error(f"LangGraph 评估失败: {e}", exc_info=True)
-        return jsonify({"error": f"评估失败: {str(e)}"}), 500
 
-    # ── 需要澄清：需求描述过于简短 ──────────────────────────
-    if result.get("needs_clarification"):
-        process_log.append("评估结果认为需求描述过短，需要补充信息")
-        question = result["clarification_question"]
-        session.add_message("assistant", question)
-        return jsonify({"success": True, "session_id": session_id,
-                        "stage": "clarifying", "message": question,
-                        "collected_info": info, "auto_detected": auto_detected,
-                        "process": process_log})
+    # ── 2. intent = new_task（全新需求拆解任务） ──────────────
+    # ── 3. intent = revise_task（订正重跑任务） ──────────────
+    # 两者共享相同的评估流程，revise_task 会基于历史上下文重新评估
+    if intent in ["new_task", "revise_task"]:
+        process_log = [f"意图识别：{intent} - {intent_reason}"]
+        
+        # ── 提取需求信息（模块/类型自动识别） ────────────────
+        info = dm.extract_requirement_info(conversation_history)
+        auto_detected = {
+            "module_detected": bool(info.get("auto_detected", {}).get("module")),
+            "type_detected": bool(info.get("auto_detected", {}).get("type")),
+        }
+
+        # 检查是否正在确认需求类型
+        is_confirmed = info.get('type_confirmed', False)
+        
+        if not is_confirmed:
+            # 需要先确认需求类型
+            requirement = info.get('requirement', '').strip()
+            
+            if not requirement:
+                process_log.append("未识别到有效需求描述，进入引导输入")
+                reply = "请描述您的产品需求，我会帮您进行拆解和工时评估。"
+                session.add_message("assistant", reply)
+                return make_response(
+                    output_type="text",
+                    content=reply,
+                    intent=intent,
+                    stage="collecting",
+                    session_id=session_id,
+                    meta={
+                        "intent_reason": intent_reason,
+                        "collected_info": info,
+                        "auto_detected": auto_detected,
+                        "process": process_log,
+                    }
+                )
+            
+            # 智能识别需求类型并询问用户确认（基于知识库分析）
+            detected_type = info.get('type', '未识别')
+            detected_module = info.get('module', '未指定')
+            related_features = info.get('related_features', [])
+            related_modules = info.get('related_modules', [])
+            
+            # 构建确认消息
+            if detected_type and detected_type != '未识别':
+                # 添加知识库分析说明
+                kb_note = "\n【分析来源】基于业务知识库和代码知识库分析"
+                
+                # 如果是调整需求且有相关功能，显示关联信息
+                if detected_type == '调整优化' and related_features:
+                    features_list = "\n".join([f"  - {f}" for f in related_features])
+                    kb_note += f"\n【关联功能】检测到以下相关功能，建议参考：\n{features_list}"
+                
+                # 如果有关联模块，显示模块信息
+                if related_modules and len(related_modules) > 1:
+                    modules_list = ", ".join(related_modules[1:])  # 跳过第一个（已作为detected_module）
+                    kb_note += f"\n【相关模块】{modules_list}"
+                
+                reply = f"根据您的需求描述，结合知识库分析，我识别到：\n\n【需求描述】{requirement[:100]}...\n【业务模块】{detected_module}\n【需求类型】{detected_type}{kb_note}\n\n请问以上识别是否正确？如果不正确，请告诉我正确的模块和类型~"
+            else:
+                # 如果类型未识别，使用AI智能追问
+                reply = dm.generate_intelligent_question(info)
+            
+            session.add_message("assistant", reply)
+            return make_response(
+                output_type="text",
+                content=reply,
+                intent=intent,
+                stage="confirming",
+                session_id=session_id,
+                meta={
+                    "intent_reason": intent_reason,
+                    "collected_info": info,
+                    "auto_detected": auto_detected,
+                    "process": process_log,
+                }
+            )
+
+        # ── 拼装完整需求文本（含模块+类型上下文） ────────────
+        full_text = f"【模块】{info['module']} 【类型】{info['type']} 【描述】{info['requirement']}"
+        process_log.append(f"提取到需求：{info['requirement'][:80]}")
+        if info.get('module'):
+            process_log.append(f"模块识别：{info['module']} ({'自动' if auto_detected['module_detected'] else '默认'})")
+        else:
+            process_log.append("模块未识别，使用默认模块")
+        if info.get('type'):
+            process_log.append(f"需求类型识别：{info['type']} ({'自动' if auto_detected['type_detected'] else '默认'})")
+        else:
+            process_log.append("需求类型未识别，默认视为新增功能")
+
+        # ── 获取完整历史对话上下文（用于 revise_task 全流程重跑） ──
+        # 过滤闲聊消息，只保留需求和评估相关内容
+        chat_keywords = ['你好', 'hello', 'hi', '您好', '早上好', '晚上好', '下午好', '嗨',
+                        '谢谢', '谢谢了', '感谢', '拜拜', '再见', '再见了', '回见',
+                        '你是谁', '你叫什么', '你能做什么', '你的功能', '介绍一下',
+                        '规则', '说明', '帮助', '使用方法', '怎么用', '什么是']
+        
+        msgs_ctx = []
+        for m in conversation_history[:-1]:  # 排除刚加入的本条消息
+            content = m['content'].lower()
+            if not any(keyword in content for keyword in chat_keywords):
+                msgs_ctx.append(m)
+        
+        # 限制上下文长度（3000字符），优先保留最新消息
+        max_total_length = 3000
+        history_ctx = ""
+        for m in reversed(msgs_ctx):
+            msg_text = f"{m['role']}: {m['content']}"
+            if len(history_ctx) + len(msg_text) <= max_total_length:
+                history_ctx = msg_text + "\n" + history_ctx
+            else:
+                remaining = max_total_length - len(history_ctx) - len(m['role']) - 2
+                if remaining > 0:
+                    history_ctx = f"{m['role']}: {m['content'][:remaining]}...\n" + history_ctx
+                break
+        
+        process_log.append(f"历史上下文长度: {len(history_ctx)}")
+
+        if intent == "revise_task":
+            process_log.append("执行全流程重跑：重新判定需求类型、重新全量结构化拆解、重新完整工时评估")
+        else:
+            process_log.append("执行全新需求拆解评估流程")
+
+        # ── 执行需求拆解与工时评估 ────────────────────────────
+        try:
+            result = worktime_agent.run_chat(
+                text=full_text,
+                model_id=model_id,
+                context=history_ctx,
+                skill_id=skill_id,
+                last_evaluation=last_evaluation,
+            )
+        except Exception as e:
+            logger.error(f"需求拆解评估失败: {e}", exc_info=True)
+            return jsonify({"error": f"评估失败: {str(e)}"}), 500
+
+        # ── 需要澄清：需求描述过于简短 ────────────────────────
+        if result.get("needs_clarification"):
+            process_log.append("评估结果认为需求描述过短，需要补充信息")
+            question = result["clarification_question"]
+            session.add_message("assistant", question)
+            return make_response(
+                output_type="text",
+                content=question,
+                intent=intent,
+                stage="clarifying",
+                session_id=session_id,
+                meta={
+                    "intent_reason": intent_reason,
+                    "collected_info": info,
+                    "auto_detected": auto_detected,
+                    "process": process_log,
+                }
+            )
 
     # ── 追问模式（已有上下文，用户在追问） ──────────────────
     if result.get("is_question"):
         process_log.append("检测到用户追问，直接生成回答")
         session.add_message("assistant", result["g_text"])
-        return jsonify({"success": True, "session_id": session_id,
-                        "stage": "answering", "formatted_result": result["g_text"],
-                        "collected_info": info, "process": process_log})
+        return make_response(
+            output_type="text",
+            content=result["g_text"],
+            intent=intent,
+            stage="answering",
+            session_id=session_id,
+            meta={
+                "intent_reason": intent_reason,
+                "collected_info": info,
+                "process": process_log,
+            }
+        )
+
+    # ── 反馈重新评估结果 ───────────────────────────────────────
+    if result.get("is_feedback"):
+        process_log.append("检测到用户反馈，执行重新评估")
+        session.add_message("assistant", result["g_text"])
+        logger.info(f"反馈重新评估完成: session={session_id} days={result['total_days']}")
+        
+        # 更新上次评估结果
+        session.set_last_evaluation({
+            "total_days": result["total_days"],
+            "role_breakdown": result.get("role_breakdown", {}),
+            "g_text": result["g_text"],
+        })
+        
+        return make_response(
+            output_type="evaluation",
+            content={
+                "g_text": result["g_text"],
+                "total_days": result["total_days"],
+                "role_breakdown": result.get("role_breakdown", {}),
+                "pages_features": [],
+            },
+            intent=intent,
+            stage="reassessment",
+            session_id=session_id,
+            meta={
+                "intent_reason": intent_reason,
+                "skill_id": skill_id,
+                "collected_info": info,
+                "auto_detected": auto_detected,
+                "process": process_log,
+                "is_feedback": True,
+            }
+        )
 
     # ── 正常评估结果 ─────────────────────────────────────────
     pages_features = result.get("pages_features", [])
@@ -315,32 +540,230 @@ def chat():
     session.add_message("assistant", formatted_result)
     logger.info(f"评估完成: session={session_id} skill={skill_id} "
                 f"pages={len(pages_features)} days={result['total_days']}")
-
-    return jsonify({
-        "success": True,
-        "session_id": session_id,
-        "stage": "assessment",
-        "skill_id": skill_id,
-        # 主要输出
-        "g_text":        result["g_text"],
-        "total_days":    result["total_days"],
+    
+    # 保存评估结果到会话（用于后续反馈重新评估）
+    session.set_last_evaluation({
+        "total_days": result["total_days"],
         "role_breakdown": role_breakdown,
+        "g_text": result["g_text"],
         "pages_features": pages_features,
-        # 向下兼容字段
-        "decomposition": [
-            {"type": p["类型"], "name": p["页面"], "features": p["功能点"]}
-            for p in pages_features
-        ],
-        "evaluation": {
-            "model": f"skill:{skill_id}",
-            "effort_days": result["total_days"],
-            "role_breakdown": role_breakdown,
-        },
-        "formatted_result": formatted_result,
-        "collected_info":   info,
-        "auto_detected":    auto_detected,
-        "process":          process_log,
     })
+
+    return make_response(
+        output_type="evaluation",
+        content={
+            "g_text": formatted_result,
+            "total_days": result["total_days"],
+            "role_breakdown": role_breakdown,
+            "pages_features": pages_features,
+            # 向下兼容字段
+            "decomposition": [
+                {"type": p["类型"], "name": p["页面"], "features": p["功能点"]}
+                for p in pages_features
+            ],
+            "evaluation": {
+                "model": f"skill:{skill_id}",
+                "effort_days": result["total_days"],
+                "role_breakdown": role_breakdown,
+            },
+        },
+        intent=intent,
+        stage="assessment",
+        session_id=session_id,
+        meta={
+            "intent_reason": intent_reason,
+            "skill_id": skill_id,
+            "collected_info": info,
+            "auto_detected": auto_detected,
+            "process": process_log,
+        }
+    )
+
+
+@app.route("/chat/stream", methods=["POST"])
+def chat_stream():
+    """流式聊天接口 — 支持thinking状态输出和逐步加载"""
+    from agent.session_manager import SessionManager
+    from agent.dialog_manager import DialogManager
+    from agent import skill_manager as sm
+    import json
+    import time
+
+    session_mgr = SessionManager()
+    dm = DialogManager()
+    data = request.get_json()
+
+    session_id = data.get("session_id")
+    message = (data.get("message") or "").strip()
+    model_id = data.get("model_id", DEFAULT_MODEL)
+    skill_id = data.get("skill_id") or sm.get_current_skill_id()
+
+    if not message:
+        return jsonify({"error": "消息内容为空"}), 400
+
+    # 获取/创建会话
+    if session_id:
+        session = session_mgr.get_session(session_id)
+    if not session_id or not session:
+        session = session_mgr.create_session()
+        session_id = session.session_id
+
+    # 获取历史对话和评估结果
+    conversation_history = session.get_messages()
+    last_evaluation = session.get_last_evaluation()
+    has_history = len(conversation_history) > 0
+    has_evaluation = bool(last_evaluation)
+
+    # 意图识别
+    intent_result = dm.analyze_intent(message, has_history, has_evaluation)
+    intent_data = json.loads(intent_result)
+    intent = intent_data["intent"]
+    intent_reason = intent_data["reason"]
+
+    session.add_message("user", message)
+    conversation_history = session.get_messages()
+
+    def generate():
+        nonlocal intent, intent_reason, session, conversation_history, last_evaluation
+        
+        # 发送意图识别结果
+        intent_data = {'type': 'intent', 'intent': intent, 'reason': intent_reason}
+        yield 'data: ' + json.dumps(intent_data) + '\n\n'
+        
+        # 处理闲聊意图
+        if intent == "chat":
+            chat_responses = {
+                "你好": "您好！我是产品需求拆解&工时评估专用Agent 😊\n\n请直接描述您的产品需求，我会帮您拆解并评估工时。\n\n示例：开发一个用户登录功能",
+                "hello": "Hello! I'm a dedicated Agent for product requirement breakdown. 😊\n\nPlease describe your product requirement directly.\n\nExample: Develop a user login feature",
+                "hi": "Hi! 😊 我是产品需求拆解&工时评估专用Agent。\n\n请直接描述您的产品需求，我会帮您拆解评估。\n\n示例：开发一个订单管理模块",
+                "您好": "您好！我是产品需求拆解&工时评估专用Agent 😊\n\n请直接描述您的产品需求，我会帮您拆解评估。\n\n示例：实现报表系统的数据可视化功能",
+                "早上好": "早上好！🌞\n\n我是产品需求拆解&工时评估专用Agent。请直接描述您的产品需求。\n\n示例：开发用户注册功能",
+                "晚上好": "晚上好！🌙\n\n我是产品需求拆解&工时评估专用Agent。请直接描述您的产品需求。\n\n示例：优化订单列表页面性能",
+                "下午好": "下午好！😊\n\n我是产品需求拆解&工时评估专用Agent。请直接描述您的产品需求。\n\n示例：开发商品管理后台",
+                "谢谢": "不客气！😊\n\n如果您有产品需求拆解或工时评估的需求，随时可以找我。",
+                "谢谢了": "不客气！😊\n\n如果您有产品需求需要评估，随时可以回来找我。",
+                "感谢": "不客气！很高兴能帮到您。😊",
+                "拜拜": "再见！👋\n\n如果您有产品需求拆解或工时评估的需求，欢迎随时回来。",
+                "再见": "再见！👋\n\n如果您有产品需求需要评估，欢迎随时回来。",
+                "你是谁": "我是产品需求拆解&工时评估专用Agent！🤖\n\n我的核心能力：\n• 需求分析与拆解\n• 工时评估与核算\n• 支持多轮迭代调整\n\n请直接描述您的产品需求！",
+                "你叫什么": "我是产品需求拆解&工时评估专用Agent！😊\n\n请直接描述您的产品需求，我会帮您拆解评估。",
+                "你能做什么": "我可以帮您：🤝\n\n1. **需求拆解**：将产品需求拆分成具体功能模块\n2. **工时评估**：套用官方工时评估标准核算工时\n3. **多轮迭代**：支持补充订正后重新评估\n\n请直接描述您的产品需求！",
+                "你的功能": "我的主要功能是产品需求拆解和工时评估！📊\n\n核心能力：\n• 智能识别需求类型\n• 全量结构化拆解\n• 工时核算评估\n• 支持多轮调整\n\n请直接描述您的产品需求！",
+                "介绍一下": "我是产品需求拆解&工时评估专用Agent！🤖\n\n我能帮您拆解产品需求并评估工时，支持多轮迭代调整。\n\n请直接描述您的产品需求！",
+                "规则": "我会按照以下规则评估：📋\n\n1. 已有功能=调整需求，新能力=新增需求\n2. 按模块、页面、功能点结构化拆解\n3. 套用官方工时评估标尺核算\n4. 支持补充纠错后全流程重算\n\n请直接描述您的产品需求！",
+                "说明": "我会：📝\n\n1. 识别需求类型（新增/调整/混合）\n2. 全量结构化拆解需求\n3. 核算工时评估\n\n请直接描述您的产品需求！",
+                "帮助": "当然可以！🙋\n\n您可以直接描述产品需求，我会帮您拆解和评估。\n\n如果需要调整，随时补充说明即可重新评估。",
+                "使用方法": "使用方法：💡\n\n1. 输入需求 → 2. 查看评估 → 3. 调整优化\n\n请直接描述您的产品需求！\n\n示例：开发一个用户登录功能",
+                "怎么用": "直接输入产品需求即可！💡\n\n示例：\n• 开发订单管理模块\n• 修复首页加载缓慢问题\n• 优化用户注册流程",
+                "什么是": "📚\n\n**需求拆解**：将产品需求拆分成具体功能模块、页面、接口等\n**工时评估**：根据拆解结果核算开发所需时间\n\n请直接描述您的产品需求，我会帮您评估！",
+            }
+            # 查找匹配的回复，如果没有匹配则给出通用回复
+            base_reply = chat_responses.get(message, None)
+            if base_reply:
+                reply = base_reply
+            else:
+                # 对于未匹配的闲聊内容，给出简洁的纠正性引导
+                reply = "我是产品需求拆解&工时评估专用Agent。请直接描述您的产品需求，我会帮您拆解评估。\n\n示例：开发一个用户登录功能"
+            
+            complete_data = {'type': 'complete', 'stage': 'chat', 'message': reply}
+            yield 'data: ' + json.dumps(complete_data) + '\n\n'
+            return
+        
+        # 处理评估任务
+        if intent in ["new_task", "revise_task"]:
+            # 提取需求信息
+            info = dm.extract_requirement_info(conversation_history)
+            is_complete = dm.check_info_complete(info)
+            
+            if not is_complete:
+                if not info.get('requirement'):
+                    reply = "请描述您的产品需求，我会帮您进行拆解和工时评估。"
+                else:
+                    reply = dm.get_next_question(info) or "请继续描述您的需求内容。"
+                
+                collect_data = {'type': 'complete', 'stage': 'collecting', 'message': reply, 'collected_info': info}
+                yield 'data: ' + json.dumps(collect_data) + '\n\n'
+                return
+            
+            # 拼装完整需求文本
+            full_text = "【模块】%s 【类型】%s 【描述】%s" % (info['module'], info['type'], info['requirement'])
+            
+            # 构建历史上下文
+            chat_keywords = ['你好', 'hello', 'hi', '您好', '早上好', '晚上好', '下午好', '嗨',
+                            '谢谢', '谢谢了', '感谢', '拜拜', '再见', '再见了', '回见']
+            msgs_ctx = []
+            for m in conversation_history[:-1]:
+                content = m['content'].lower()
+                if not any(keyword in content for keyword in chat_keywords):
+                    msgs_ctx.append(m)
+            
+            max_total_length = 3000
+            history_ctx = ""
+            for m in reversed(msgs_ctx):
+                msg_text = "%s: %s" % (m['role'], m['content'])
+                if len(history_ctx) + len(msg_text) <= max_total_length:
+                    history_ctx = msg_text + "\n" + history_ctx
+                else:
+                    break
+            
+            # 发送thinking状态
+            thinking_steps = [
+                "正在分析需求...",
+                "正在加载知识库...",
+                "正在识别需求类型...",
+                "正在进行结构化拆解...",
+                "正在核算工时...",
+                "正在整理结果...",
+            ]
+            
+            for step in thinking_steps:
+                thinking_data = {'type': 'thinking', 'message': step}
+                yield 'data: ' + json.dumps(thinking_data) + '\n\n'
+                time.sleep(0.3)
+            
+            # 执行评估
+            try:
+                result = worktime_agent.run_chat(
+                    text=full_text,
+                    model_id=model_id,
+                    context=history_ctx,
+                    skill_id=skill_id,
+                    last_evaluation=last_evaluation,
+                )
+            except Exception as e:
+                error_data = {'type': 'error', 'message': '评估失败: ' + str(e)}
+                yield 'data: ' + json.dumps(error_data) + '\n\n'
+                return
+            
+            if result.get("needs_clarification"):
+                clarify_data = {'type': 'complete', 'stage': 'clarifying', 'message': result['clarification_question']}
+                yield 'data: ' + json.dumps(clarify_data) + '\n\n'
+                return
+            
+            # 保存评估结果
+            session.set_last_evaluation({
+                "total_days": result["total_days"],
+                "role_breakdown": result.get("role_breakdown", {}),
+                "g_text": result["g_text"],
+                "pages_features": result.get("pages_features", []),
+            })
+            session.add_message("assistant", result["g_text"])
+            
+            # 发送评估结果
+            result_data = {
+                'type': 'complete',
+                'stage': 'assessment',
+                'intent': intent,
+                'intent_reason': intent_reason,
+                'g_text': result['g_text'],
+                'total_days': result['total_days'],
+                'role_breakdown': result.get('role_breakdown', {}),
+                'pages_features': result.get('pages_features', []),
+            }
+            yield 'data: ' + json.dumps(result_data) + '\n\n'
+            return
+
+    return Response(generate(), mimetype='text/event-stream')
 
 
 @app.route("/upload", methods=["POST"])
@@ -375,6 +798,9 @@ def upload():
         logger.error(f"解析 Excel 失败: {e}")
         return jsonify({"error": f"解析 Excel 失败：{e}"}), 400
 
+    # 统计已填写的行数
+    filled_count = sum(1 for r in rows if r.get("existing_g"))
+    
     preview_rows = [
         {
             "row":        r["row"],
@@ -388,10 +814,11 @@ def upload():
     ]
 
     return jsonify({
-        "file_id":  file_id,
-        "filename": filename,
-        "total":    len(rows),
-        "rows":     preview_rows,
+        "file_id":      file_id,
+        "filename":     filename,
+        "total":        len(rows),
+        "filled_count": filled_count,
+        "rows":         preview_rows,
     })
 
 

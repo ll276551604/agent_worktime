@@ -378,17 +378,23 @@
 
     .thinking-dots {
       display: flex;
-      gap: 4px;
+      gap: 8px;
       align-items: center;
       padding: 10px 14px;
       background: var(--ai-bubble);
-      border: 1px solid var(--border);
-      border-radius: calc(var(--radius) + 4px);
+      border-top-left-radius: var(--radius);
+      border-top-right-radius: var(--radius);
       border-bottom-left-radius: 4px;
+      font-size: 14px;
+      color: var(--muted-fg);
+    }
+    .thinking-text {
+      font-weight: 500;
+      opacity: 0.7;
     }
     .thinking-dots.hidden { display: none; }
     .dot {
-      width: 8px; height: 8px;
+      width: 6px; height: 6px;
       border-radius: 50%;
       background: var(--muted-fg);
       opacity: 0.4;
@@ -396,6 +402,7 @@
     }
     .dot:nth-child(2) { animation-delay: 0.2s; }
     .dot:nth-child(3) { animation-delay: 0.4s; }
+    .dot:nth-child(4) { animation-delay: 0.6s; }
     @keyframes pulse {
       0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
       40% { opacity: 1; transform: scale(1); }
@@ -795,6 +802,7 @@
       <div id="messages-container"></div>
 
       <div class="thinking-dots hidden" id="thinking-dots">
+        <span class="thinking-text">Thinking...</span>
         <div class="dot"></div>
         <div class="dot"></div>
         <div class="dot"></div>
@@ -827,12 +835,6 @@
           </button>
         </div>
 
-        <!-- 跳过已填写选项（仅文件模式显示） -->
-        <label class="skip-toggle hidden" id="skip-label">
-          <input type="checkbox" id="skip-filled" checked>
-          跳过已填写
-        </label>
-
         <!-- 发送按钮 -->
         <button class="btn-send" id="btn-send" disabled title="发送">
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -857,6 +859,10 @@
   
   // 评估结果缓存（用于导出）
   let lastEvaluationResult = null;
+  
+  // 文件上传状态
+  let fileFilledCount = 0;
+  let skipFilledConfirmed = null;
 
   // HTML 转义函数
   function esc(s) {
@@ -1021,8 +1027,20 @@
       if (data.error) { showError(data.error); clearFileDisplay(); return; }
 
       fileId = data.file_id;
-      setFileDisplay(data.filename, `${data.total} 行需求`);
-      document.getElementById('btn-send').disabled = false;
+      fileFilledCount = data.filled_count || 0;
+      skipFilledConfirmed = null;
+
+      // 如果有已填写的内容，询问用户是否覆盖
+      if (fileFilledCount > 0 && data.total > 0) {
+        setFileDisplay(data.filename, `${data.total} 行需求（${fileFilledCount} 行已填写）`);
+        const confirmText = `检测到表格中有 ${fileFilledCount} 行已填写了评估内容，请问需要覆盖这些内容吗？`;
+        addMessage('ai', confirmText);
+        scrollBottom();
+        // 等待用户确认，不启用发送按钮
+      } else {
+        setFileDisplay(data.filename, `${data.total} 行需求`);
+        document.getElementById('btn-send').disabled = false;
+      }
 
       addSession(data.filename, data.total);
     } catch (e) {
@@ -1049,8 +1067,32 @@
     // 判断是文件模式还是文本模式
     const isFileMode = fileId !== null;
     
-    if (isFileMode) {
-      // 文件模式
+    // 检查是否正在等待用户确认覆盖
+    if (isFileMode && fileFilledCount > 0 && skipFilledConfirmed === null) {
+      // 用户正在回复覆盖确认问题
+      const userReply = text.trim().toLowerCase();
+      if (userReply.includes('覆盖') || userReply.includes('是') || userReply.includes('对') || userReply.includes('ok')) {
+        skipFilledConfirmed = false; // 覆盖已填写内容
+        addMessage('user', text);
+        document.getElementById('text-input').value = '';
+        showThinking();
+        scrollBottom();
+      } else if (userReply.includes('跳过') || userReply.includes('否') || userReply.includes('不') || userReply.includes('保留')) {
+        skipFilledConfirmed = true; // 跳过已填写内容
+        addMessage('user', text);
+        document.getElementById('text-input').value = '';
+        showThinking();
+        scrollBottom();
+      } else {
+        // 无法理解回复，重新询问
+        addMessage('ai', '不好意思，我没理解您的意思。请问是否需要覆盖已填写的内容？（请回答：覆盖 或 跳过）');
+        processingFile = false;
+        document.getElementById('btn-send').disabled = false;
+        scrollBottom();
+        return;
+      }
+    } else if (isFileMode) {
+      // 文件模式（没有需要确认的内容或已确认）
       const filename = document.getElementById('file-name').textContent;
       addMessage('user', `已上传文件：${filename}`);
     } else if (text) {
@@ -1063,12 +1105,14 @@
       return;
     }
 
-    showThinking();
-    scrollBottom();
+    if (!isFileMode) {
+      showThinking();
+      scrollBottom();
+    }
 
     if (isFileMode) {
       // 文件处理流程
-      const skipFilled = document.getElementById('skip-filled').checked;
+      const skipFilled = skipFilledConfirmed !== null ? skipFilledConfirmed : false;
       try {
         const resp = await fetch('/process', {
           method: 'POST',
@@ -1116,15 +1160,20 @@
         currentSessionId = data.session_id;
         localStorage.setItem('wt_session_id', currentSessionId);
         
-        // 根据阶段处理响应
-        if (data.stage === 'collecting' || data.stage === 'clarifying') {
-          // 正在收集信息或回答问题，使用纯对话输出
-          addMessage('ai', data.message, formatProcess(data.process));
-        } else if (data.stage === 'answering') {
-          addMessage('ai', data.formatted_result || data.message, formatProcess(data.process));
-        } else if (data.stage === 'assessment') {
-          // 评估完成，显示结果
-          const info = data.collected_info || {};
+        // 获取统一输出格式
+        const output = data.output || {};
+        const meta = data.meta || {};
+        const process = meta.process || [];
+        
+        // 根据输出类型处理响应（前端只负责展示，不关心业务逻辑）
+        if (output.type === 'text') {
+          // 文本消息：闲聊、收集信息、追问等（不显示 process）
+          addMessage('ai', output.content);
+        } else if (output.type === 'evaluation') {
+          // 评估结果：正常评估或重新评估（不显示 process）
+          const content = output.content || {};
+          const info = meta.collected_info || {};
+          
           lastEvaluationResult = {
             results: [{
               original_requirement: {
@@ -1139,16 +1188,54 @@
                 existing_features: info.existing_features || [],
                 suggestions: info.suggestions || []
               },
-              decomposition: data.decomposition || [],
-              evaluation: data.evaluation || {},
+              decomposition: content.decomposition || [],
+              evaluation: content.evaluation || {},
             }],
-            total_days: data.evaluation?.effort_days || data.total_days || 0,
+            total_days: content.evaluation?.effort_days || content.total_days || 0,
             requirement_count: 1,
           };
           document.getElementById('btn-export-eval').classList.remove('hidden');
-          addMessage('ai', formatEvaluationResult(data), formatProcess(data.process));
-          // 清除进度指示
+          addMessage('ai', formatEvaluationResult({...data, ...content}));
           clearProgressIndicator();
+        } else if (output.type === 'thinking') {
+          // 思考状态：显示进度
+          showProgress(output.content);
+        } else if (output.type === 'error') {
+          // 错误处理
+          showError(output.content);
+        }
+        
+        // 向下兼容：处理旧格式（如果有）
+        else if (data.stage) {
+          // 旧格式处理（保持兼容）
+          if (data.stage === 'assessment' || data.stage === 'reassessment') {
+            const info = data.collected_info || {};
+            lastEvaluationResult = {
+              results: [{
+                original_requirement: {
+                  module: info.module || '',
+                  feature: info.requirement?.split('\n')[0] || '',
+                  detail: info.requirement || ''
+                },
+                analysis: {
+                  judgment: info.type || '未知',
+                  confidence: info.confidence || 0.8,
+                  related_modules: info.related_modules || [],
+                  existing_features: info.existing_features || [],
+                  suggestions: info.suggestions || []
+                },
+                decomposition: data.decomposition || [],
+                evaluation: data.evaluation || {},
+              }],
+              total_days: data.evaluation?.effort_days || data.total_days || 0,
+              requirement_count: 1,
+            };
+            document.getElementById('btn-export-eval').classList.remove('hidden');
+            addMessage('ai', formatEvaluationResult(data), formatProcess(data.process));
+            clearProgressIndicator();
+          } else {
+            addMessage('ai', data.formatted_result || data.message || '暂无回复', formatProcess(data.process));
+          }
         }
         
         scrollBottom();
@@ -1417,7 +1504,6 @@
     document.getElementById('text-input').classList.add('hidden');
     document.getElementById('file-name').textContent = name;
     document.getElementById('file-tag').textContent = tagText;
-    document.getElementById('skip-label').classList.remove('hidden');
   }
 
   function clearFileDisplay() {
@@ -1425,8 +1511,9 @@
     document.getElementById('text-input').classList.remove('hidden');
     document.getElementById('file-name').textContent = '';
     document.getElementById('file-tag').textContent = '';
-    document.getElementById('skip-label').classList.add('hidden');
     fileId = null;
+    fileFilledCount = 0;
+    skipFilledConfirmed = null;
   }
 
   function updateProgressIndicator(info) {

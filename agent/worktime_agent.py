@@ -92,8 +92,20 @@ def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
                 "detail":  row_data.get("detail", ""),
             }
 
-            # 缓存检查（缓存 key 包含 skill_id）
-            cache_req = {**req, "_skill": sid}
+            # 强制：使用知识库分析需求类型（新增/调整）
+            from agent.knowledge_manager import get_knowledge_manager
+            km = get_knowledge_manager()
+            kb_analysis = km.analyze_requirement(req)
+            req_type = kb_analysis.get("judgment", "新增")
+            
+            # 如果是调整需求，获取关联的现有功能作为拆解参考
+            related_features = kb_analysis.get("existing_features", [])
+            related_modules = kb_analysis.get("related_modules", [])
+            
+            logger.info(f"[Agent] 需求分析: 行 {row_num}, 类型={req_type}, 关联功能={related_features}")
+
+            # 缓存检查（缓存 key 包含 skill_id 和需求类型）
+            cache_req = {**req, "_skill": sid, "_type": req_type}
             cached_result = _get_cached_result(cache_req)
             if cached_result:
                 logger.info(f"[Agent] 命中缓存: 行 {row_num}")
@@ -101,6 +113,14 @@ def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
             else:
                 code_ctx  = sm.load_code_knowledge(
                     query=f"{req['feature']} {req['detail'][:60]}", limit=2)
+                
+                # 构建分析上下文
+                analysis_context = {
+                    "requirement_type": req_type,
+                    "related_features": related_features,
+                    "related_modules": related_modules,
+                }
+                
                 state_out = graph.invoke({
                     "raw_requirement":  req,
                     "model_id":         model_id,
@@ -118,6 +138,7 @@ def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
                     "role_breakdown":   {},
                     "retry_count":      0,
                     "errors":           [],
+                    "analysis_context": analysis_context,  # 新增：分析上下文
                 })
                 _set_cached_result(cache_req, state_out)
 
@@ -200,11 +221,14 @@ def run_text(text: str, model_id: str = None, progress_callback=None, skill_id: 
 
 
 def run_chat(text: str, model_id: str = None, progress_callback=None,
-             context: str = "", skill_id: str = None) -> dict:
+             context: str = "", skill_id: str = None, last_evaluation: dict = None,
+             thinking_callback=None) -> dict:
     """
-    处理聊天消息（支持上下文 + 可切换技能）。
+    处理聊天消息（支持上下文 + 可切换技能 + 反馈重新评估）。
     - 需求描述过短时返回澄清追问（needs_clarification=True）
     - 通过 skill_id 注入对应技能的 prompt 规则 + 历史案例 + 代码知识库
+    - 支持根据反馈重新评估（传入 last_evaluation 参数）
+    - 支持 thinking_callback 输出思考状态
     返回:
     {
       "g_text": str,
@@ -215,6 +239,7 @@ def run_chat(text: str, model_id: str = None, progress_callback=None,
       "is_question": bool,
       "needs_clarification": bool,
       "clarification_question": str,  # 当 needs_clarification=True 时有值
+      "is_feedback": bool,            # 是否是反馈重新评估
     }
     """
     from agent import skill_manager as sm
@@ -223,16 +248,28 @@ def run_chat(text: str, model_id: str = None, progress_callback=None,
     if not text:
         raise ValueError("消息内容为空")
 
+    # ── 反馈模式（判断是否是对评估结果的反馈，需要重新评估） ──────
+    is_feedback = _is_feedback(text)
+    if is_feedback and last_evaluation:
+        logger.info(f"[Agent-Chat] 反馈重新评估模式: {text[:40]}")
+        if thinking_callback:
+            thinking_callback("正在分析您的反馈...")
+        # 使用历史评估结果作为基础，结合反馈重新评估
+        return _re_evaluate_with_feedback(text, context, model_id, skill_id, last_evaluation)
+
     # ── 追问模式（判断是否是对已有评估结果的追问） ────────────
     is_question = _is_question(text)
     if is_question and context:
         logger.info(f"[Agent-Chat] 追问模式: {text[:40]}")
+        if thinking_callback:
+            thinking_callback("正在分析您的问题...")
         response = _answer_question(text, context, model_id)
         return {
             "g_text": response, "total_days": 0.0, "page_count": 0,
             "role_breakdown": {}, "pages_features": [],
             "is_question": True, "needs_clarification": False,
             "clarification_question": "",
+            "is_feedback": False,
         }
 
     # ── 拆解需求描述 ─────────────────────────────────────────
@@ -262,6 +299,9 @@ def run_chat(text: str, model_id: str = None, progress_callback=None,
     }
 
     # ── 加载技能配置 + 历史案例 + 代码知识库 ─────────────────
+    if thinking_callback:
+        thinking_callback("正在加载知识库和技能配置...")
+    
     sid          = skill_id or sm.get_current_skill_id()
     skill_config = sm.get_skill(sid)
     examples     = sm.load_examples(sid, limit=3)
@@ -269,8 +309,26 @@ def run_chat(text: str, model_id: str = None, progress_callback=None,
 
     logger.info(f"[Agent-Chat] 需求={feature[:40]} 技能={sid} 历史案例={len(examples)} 代码知识={bool(code_context)}")
 
+    # ── 加载知识库 ─────────────────────────────────────────
+    if thinking_callback:
+        thinking_callback("正在加载企业知识库...")
+    
     kb    = KnowledgeLoader().load()
+    
+    # ── 构建并执行工作流 ───────────────────────────────────
+    if thinking_callback:
+        thinking_callback("正在构建分析流程...")
+    
     graph = build_graph()
+
+    if thinking_callback:
+        thinking_callback("正在识别需求类型...")
+
+    if thinking_callback:
+        thinking_callback("正在进行结构化拆解...")
+
+    if thinking_callback:
+        thinking_callback("正在核算工时评估...")
 
     state = graph.invoke({
         "raw_requirement":  req,
@@ -293,6 +351,10 @@ def run_chat(text: str, model_id: str = None, progress_callback=None,
         "errors":          [],
     })
 
+    # ── 整理结果 ─────────────────────────────────────────
+    if thinking_callback:
+        thinking_callback("正在整理评估结果...")
+
     g_text         = state.get("g_column_text", "")
     total_days     = state.get("total_days", 1.0)
     role_breakdown = state.get("role_breakdown", {})
@@ -303,12 +365,153 @@ def run_chat(text: str, model_id: str = None, progress_callback=None,
         preview = g_text.split("\n")[0][:60] if g_text else ""
         progress_callback(1, 1, 1, "done", preview, page_count)
 
+    if thinking_callback:
+        thinking_callback("评估完成！")
+
     return {
         "g_text": g_text, "total_days": total_days, "page_count": page_count,
         "role_breakdown": role_breakdown, "pages_features": pages_features,
         "is_question": False, "needs_clarification": False,
         "clarification_question": "",
+        "is_feedback": False,
     }
+
+
+def _re_evaluate_with_feedback(feedback: str, context: str, model_id: str, skill_id: str, last_evaluation: dict) -> dict:
+    """
+    根据用户反馈重新评估需求
+    :param feedback: 用户反馈内容（原始用户消息，非 full_text）
+    :param context: 历史对话上下文（含原始评估结果）
+    :param model_id: 模型ID
+    :param skill_id: 技能ID
+    :param last_evaluation: 上一次评估结果（可选）
+    :return: 重新评估结果
+    """
+    from agent import gemini_client
+
+    original_eval_text = ""
+    original_summary = ""
+    if last_evaluation:
+        original_eval_text = last_evaluation.get('g_text', '')[:800]
+        total_days = last_evaluation.get('total_days', 0)
+        role_breakdown = last_evaluation.get('role_breakdown', {})
+        role_str = "、".join(f"{k}:{v}天" for k, v in role_breakdown.items()) if role_breakdown else "未知"
+        original_summary = f"总工时：{total_days}天，角色分配：{role_str}"
+
+    prompt = f"""你是一位有10年经验的IT项目经理和产品专家。
+
+## 对话历史（含原始需求和上次评估结果）
+{context}
+
+## 上次评估摘要
+{original_summary}
+
+## 上次评估详情
+{original_eval_text}
+
+## 用户的修改反馈
+{feedback}
+
+## 任务
+根据用户反馈，对上次的工时评估进行调整，输出修正后的完整拆解和工时。
+
+## 输出格式（严格JSON）
+{{
+  "g_text": "修正后的完整拆解说明（包含各页面/功能点和工时）",
+  "total_days": 5.0,
+  "role_breakdown": {{"产品/设计": 1.0, "前端开发": 1.0, "后端开发": 2.0, "测试": 1.0}},
+  "reason": "调整原因说明"
+}}
+
+## 注意
+- g_text 要包含完整的拆解内容，不能只说"已调整"
+- total_days 精确到0.5天
+- 只输出JSON，不要其他内容"""
+
+    try:
+        response = gemini_client.call_llm(prompt, model_id=model_id)
+        import json
+        text = response.strip().replace('```json', '').replace('```', '')
+        data = json.loads(text)
+        
+        return {
+            "g_text": data.get("g_text", response),
+            "total_days": data.get("total_days", 1.0),
+            "page_count": 0,
+            "role_breakdown": data.get("role_breakdown", {}),
+            "pages_features": [],
+            "is_question": False,
+            "needs_clarification": False,
+            "clarification_question": "",
+            "is_feedback": True,
+        }
+    except Exception as e:
+        logger.error(f"重新评估失败: {e}")
+        # 降级处理：基于反馈简单调整
+        adjusted_days = _adjust_worktime_by_feedback(last_evaluation, feedback)
+        return {
+            "g_text": f"【反馈调整】{feedback}\n\n根据您的反馈，重新评估结果如下：\n{adjusted_days.get('g_text', '')}",
+            "total_days": adjusted_days.get("total_days", 1.0),
+            "page_count": 0,
+            "role_breakdown": adjusted_days.get("role_breakdown", {}),
+            "pages_features": [],
+            "is_question": False,
+            "needs_clarification": False,
+            "clarification_question": "",
+            "is_feedback": True,
+        }
+
+
+def _adjust_worktime_by_feedback(last_evaluation: dict, feedback: str) -> dict:
+    """
+    基于用户反馈简单调整工时（降级策略）
+    """
+    import re
+    
+    result = {
+        "total_days": last_evaluation.get("total_days", 1.0),
+        "role_breakdown": last_evaluation.get("role_breakdown", {}),
+        "g_text": "",
+    }
+    
+    # 根据关键词调整工时
+    if "太高" in feedback or "调低" in feedback or "减少" in feedback:
+        # 降低20%-30%
+        factor = 0.75 if "大幅" in feedback else 0.85
+        result["total_days"] = round(result["total_days"] * factor * 2) / 2
+        result["g_text"] = f"根据反馈，工时下调约{int((1-factor)*100)}%，调整为 {result['total_days']} 天"
+    
+    elif "太低" in feedback or "调高" in feedback or "增加" in feedback:
+        # 增加15%-30%
+        factor = 1.3 if "大幅" in feedback else 1.15
+        result["total_days"] = round(result["total_days"] * factor * 2) / 2
+        result["g_text"] = f"根据反馈，工时上调约{int((factor-1)*100)}%，调整为 {result['total_days']} 天"
+    
+    elif "重新评估" in feedback or "重新计算" in feedback:
+        result["g_text"] = "已重新评估，结果保持不变"
+    
+    # 调整特定角色工时
+    role_pattern = r'(前端|后端|产品|测试).*(\d+\.?\d*)天'
+    match = re.search(role_pattern, feedback)
+    if match:
+        role = match.group(1)
+        days = float(match.group(2))
+        
+        # 映射角色名称
+        role_mapping = {
+            "前端": "前端开发",
+            "后端": "后端开发", 
+            "产品": "产品/设计",
+            "测试": "测试",
+        }
+        role_key = role_mapping.get(role, role)
+        
+        result["role_breakdown"][role_key] = days
+        # 重新计算总工时
+        result["total_days"] = round(sum(result["role_breakdown"].values()) * 2) / 2
+        result["g_text"] = f"已调整{role}工时为 {days} 天，总工时更新为 {result['total_days']} 天"
+    
+    return result
 
 
 def _is_question(text: str) -> bool:
@@ -338,13 +541,101 @@ def _is_question(text: str) -> bool:
         r'^说明.*',
         r'^分析.*',
         r'^比较.*',
-        r'^评估.*',
     ]
     
     import re
     text = text.strip()
     for pattern in question_patterns:
         if re.match(pattern, text):
+            return True
+    return False
+
+
+def _is_feedback(text: str) -> bool:
+    """判断是否是评估反馈/修正请求（需要重新评估）"""
+    feedback_patterns = [
+        # ========== 数值调整类 ==========
+        r'.*太高.*',
+        r'.*太低.*',
+        r'.*偏高.*',
+        r'.*偏低.*',
+        r'.*调整.*工时',
+        r'.*工时.*调整',
+        r'.*修改.*工时',
+        r'.*工时.*修改',
+        r'.*改.*工时',
+        r'.*工时.*改',
+        r'.*调低.*',
+        r'.*调高.*',
+        r'.*减少.*天',
+        r'.*增加.*天',
+        r'.*加.*天',
+        r'.*减.*天',
+        r'.*天数.*不对',
+        r'.*工日.*调整',
+        
+        # ========== 重新评估类 ==========
+        r'重新评估',
+        r'重新计算',
+        r'重新拆解',
+        r'再算一遍',
+        r'再评估一次',
+        r'重新算一下',
+        r'重新估一下',
+        r'帮我再算',
+        r'重新来',
+        r'重新分析',
+        r'重新评估一下',
+        r'重新计算一下',
+        
+        # ========== 否定/质疑类 ==========
+        r'.*不合理.*',
+        r'.*不准确.*',
+        r'.*不对.*',
+        r'.*错了.*',
+        r'.*有问题.*',
+        r'.*估时.*不准',
+        r'.*估算.*不准',
+        r'.*评估.*不准',
+        r'.*工时.*不准',
+        r'.*天数.*不准',
+        r'.*算错.*',
+        r'.*少算了.*',
+        r'.*多算了.*',
+        r'.*漏算了.*',
+        
+        # ========== 功能调整类 ==========
+        r'.*漏了.*功能',
+        r'.*多了.*功能',
+        r'.*缺少.*功能',
+        r'.*不需要.*',
+        r'.*增加.*功能',
+        r'.*去掉.*功能',
+        r'.*移除.*功能',
+        r'.*补充.*功能',
+        r'.*遗漏.*功能',
+        
+        # ========== 确认/指示类 ==========
+        r'按这个来',
+        r'按这个调整',
+        r'按我说的算',
+        r'按这个修改',
+        r'按照这个来',
+        
+        # ========== 疑问/请求类 ==========
+        r'.*能不能.*再算',
+        r'.*能不能.*重新',
+        r'.*可以.*重新评估',
+        r'.*应该.*多少天',
+        r'.*需要.*多少天',
+        r'.*工时.*应该是',
+        r'.*天数.*应该是',
+    ]
+    
+    import re
+    text = text.strip()
+    for pattern in feedback_patterns:
+        if re.search(pattern, text):
             return True
     return False
 
@@ -560,12 +851,13 @@ def format_evaluation_result(eval_result: Dict[str, Any]) -> str:
         for feat in part.get('features', []):
             result_text += f"  - {feat}\n"
     
+    suggestions_text = '【建议】\n' + '\n'.join(analysis['suggestions']) if analysis.get('suggestions') else ''
     result_text += f"""
 【工时评估】
 模型: {evaluation.get('model', '综合评估')}
 预估工时: {evaluation.get('effort_days', 0)} 天
 
-{'' if not analysis.get('suggestions') else '【建议】\n' + '\n'.join(analysis['suggestions'])}
+{suggestions_text}
 """
     
     return result_text
