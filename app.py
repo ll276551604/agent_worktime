@@ -63,6 +63,59 @@ app.config['TIMEOUT'] = 300  # 5分钟超时
 
 
 # ============================================================
+# 结构化追问（LLM 驱动）
+# ============================================================
+def _generate_clarifying_question(conversation_history: list, dm, model_id: str, existing_requirement: str = "") -> str:
+    """使用 LLM 生成结构化的澄清追问，帮助用户完善需求描述"""
+    from agent import gemini_client
+
+    # 构建上下文
+    ctx_lines = []
+    for msg in conversation_history[-6:]:  # 最近6条消息
+        role = "用户" if msg["role"] == "user" else "助手"
+        ctx_lines.append(f"{role}: {msg['content']}")
+    context = "\n".join(ctx_lines) if ctx_lines else "（无历史对话）"
+
+    req_line = f"\n当前需求描述: {existing_requirement}" if existing_requirement else ""
+
+    prompt = f"""你是一位专业的产品经理，正在引导用户描述产品需求。
+
+## 对话上下文
+{context}{req_line}
+
+## 任务
+用户的需求描述不够完整，请生成 1~2 个结构化的追问问题，帮助用户补充关键信息。
+
+## 追问原则
+1. 先判断用户已经说了什么，再判断缺什么
+2. 每次最多问 2 个问题，问题要具体、有针对性
+3. 问题格式：用自然口语化的方式提问，末尾加「~」
+4. 如果用户已经描述了功能，追问应聚焦：涉及哪些页面/模块？是新增还是改造？涉及哪些角色？
+5. 如果用户只说了模块名，追问：具体要做什么功能？是新增还是调整？
+
+## 输出格式
+直接输出追问内容，不要任何其他说明。
+
+示例1（需求过短）：
+根据您的描述「店铺管理新增字段」，我想再确认几个细节~
+1. 这个字段在哪些页面需要展示？（列表页、详情页、还是其他页面？）
+2. 只是展示还是需要支持编辑？
+
+示例2（缺少类型）：
+我理解您想在「订单管理」模块做调整~ 请问具体是：
+1. 新增什么功能？还是对已有功能做优化？
+2. 涉及哪些页面和操作流程？
+"""
+
+    try:
+        response = gemini_client.call_llm(prompt, model_id=model_id)
+        return response.strip()
+    except Exception:
+        # 降级为规则追问
+        return dm.generate_intelligent_question({"requirement": existing_requirement, "module": "", "type": ""})
+
+
+# ============================================================
 # 统一响应格式
 # ============================================================
 def make_response(output_type, content, intent=None, stage=None, session_id=None, meta=None):
@@ -321,70 +374,26 @@ def chat():
     if intent in ["new_task", "revise_task"]:
         process_log = [f"意图识别：{intent} - {intent_reason}"]
         
-        # ── 提取需求信息（模块/类型自动识别） ────────────────
+        # ── 提取需求信息（模块/类型自动识别，无需用户确认） ────────────────
         info = dm.extract_requirement_info(conversation_history)
         auto_detected = {
             "module_detected": bool(info.get("auto_detected", {}).get("module")),
             "type_detected": bool(info.get("auto_detected", {}).get("type")),
         }
 
-        # 检查是否正在确认需求类型
-        is_confirmed = info.get('type_confirmed', False)
-        
-        if not is_confirmed:
-            # 需要先确认需求类型
-            requirement = info.get('requirement', '').strip()
-            
-            if not requirement:
-                process_log.append("未识别到有效需求描述，进入引导输入")
-                reply = "请描述您的产品需求，我会帮您进行拆解和工时评估。"
-                session.add_message("assistant", reply)
-                return make_response(
-                    output_type="text",
-                    content=reply,
-                    intent=intent,
-                    stage="collecting",
-                    session_id=session_id,
-                    meta={
-                        "intent_reason": intent_reason,
-                        "collected_info": info,
-                        "auto_detected": auto_detected,
-                        "process": process_log,
-                    }
-                )
-            
-            # 智能识别需求类型并询问用户确认（基于知识库分析）
-            detected_type = info.get('type', '未识别')
-            detected_module = info.get('module', '未指定')
-            related_features = info.get('related_features', [])
-            related_modules = info.get('related_modules', [])
-            
-            # 构建确认消息
-            if detected_type and detected_type != '未识别':
-                # 添加知识库分析说明
-                kb_note = "\n【分析来源】基于业务知识库和代码知识库分析"
-                
-                # 如果是调整需求且有相关功能，显示关联信息
-                if detected_type == '调整优化' and related_features:
-                    features_list = "\n".join([f"  - {f}" for f in related_features])
-                    kb_note += f"\n【关联功能】检测到以下相关功能，建议参考：\n{features_list}"
-                
-                # 如果有关联模块，显示模块信息
-                if related_modules and len(related_modules) > 1:
-                    modules_list = ", ".join(related_modules[1:])  # 跳过第一个（已作为detected_module）
-                    kb_note += f"\n【相关模块】{modules_list}"
-                
-                reply = f"根据您的需求描述，结合知识库分析，我识别到：\n\n【需求描述】{requirement[:100]}...\n【业务模块】{detected_module}\n【需求类型】{detected_type}{kb_note}\n\n请问以上识别是否正确？如果不正确，请告诉我正确的模块和类型~"
-            else:
-                # 如果类型未识别，使用AI智能追问
-                reply = dm.generate_intelligent_question(info)
-            
-            session.add_message("assistant", reply)
+        # ── 检查是否有有效需求描述 ────────────────
+        requirement = info.get('requirement', '').strip()
+
+        if not requirement:
+            # 没有有效需求，使用 LLM 生成结构化追问
+            process_log.append("未识别到有效需求描述，生成结构化追问")
+            question = _generate_clarifying_question(conversation_history, dm, model_id)
+            session.add_message("assistant", question)
             return make_response(
                 output_type="text",
-                content=reply,
+                content=question,
                 intent=intent,
-                stage="confirming",
+                stage="clarifying",
                 session_id=session_id,
                 meta={
                     "intent_reason": intent_reason,
@@ -393,6 +402,27 @@ def chat():
                     "process": process_log,
                 }
             )
+
+        # 需求描述过短，使用 LLM 生成结构化追问
+        if len(requirement) < 15:
+            process_log.append("需求描述过短，生成结构化追问")
+            question = _generate_clarifying_question(conversation_history, dm, model_id, requirement)
+            session.add_message("assistant", question)
+            return make_response(
+                output_type="text",
+                content=question,
+                intent=intent,
+                stage="clarifying",
+                session_id=session_id,
+                meta={
+                    "intent_reason": intent_reason,
+                    "collected_info": info,
+                    "auto_detected": auto_detected,
+                    "process": process_log,
+                }
+            )
+
+        process_log.append(f"自动识别 → 模块: {info.get('module', '未指定')} 类型: {info.get('type', '新增功能')}")
 
         # ── 拼装完整需求文本（含模块+类型上下文） ────────────
         full_text = f"【模块】{info['module']} 【类型】{info['type']} 【描述】{info['requirement']}"

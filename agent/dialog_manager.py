@@ -287,95 +287,131 @@ class DialogManager:
                 'module': False,
                 'type': False
             },
-            'kb_analysis': None,  # 新增：知识库分析结果
-            'related_features': [],  # 新增：关联的现有功能
+            'kb_analysis': None,
+            'related_features': [],
         }
-        
+
         # 收集所有用户消息
         user_messages = []
         for msg in conversation_history:
             if msg['role'] == 'user':
                 user_messages.append(msg['content'])
-        
-        # 合并所有用户消息作为需求描述
-        requirement_text = ' '.join(user_messages).strip()
-        
-        # 检查是否是需求描述
-        if not self._is_requirement_description(requirement_text):
-            return info  # 返回空info，表示不是需求
-        
-        info['requirement'] = requirement_text
-        
-        if not requirement_text:
+
+        if not user_messages:
             return info
-        
-        # ============== 检查用户是否确认（识别确认关键词）==============
-        # 获取最后一条用户消息（用于判断是否是确认回复）
-        last_user_msg = user_messages[-1] if user_messages else ''
-        
-        # 确认关键词
-        confirm_keywords = ['对', '是的', '正确', '确认', '没错', '好的', '可以', 'ok', '嗯']
-        deny_keywords = ['不对', '不是', '错了', '错误', '不正确', '重新']
-        
-        # 判断是否是确认回复
+
+        # 获取最后一条用户消息（用于判断确认/纠正意图）
+        last_user_msg = user_messages[-1]
+        prev_messages = user_messages[:-1]
+
+        # ============== 确定原始需求文本 ==============
+        # 第一条有意义的消息作为原始需求，后续消息视为补充/纠正
+        original_requirement = ''
+        for msg in prev_messages:
+            if self._is_requirement_description(msg):
+                original_requirement = msg
+                break
+
+        # ============== 判断确认/纠正意图 ==============
+        confirm_keywords = ['对', '是的', '是', '正确', '确认', '没错', '好的', '可以', 'ok', '嗯', '对，']
+        deny_keywords = ['不对', '不是的', '错了', '错误', '不正确', '重新', '不是新增', '不是原有']
+
         is_confirm = any(keyword in last_user_msg for keyword in confirm_keywords)
         is_deny = any(keyword in last_user_msg for keyword in deny_keywords)
-        
-        # 如果是确认，设置确认状态
+
+        # 如果用户在确认阶段主动提供了类型/模块信息，视为确认+纠正
+        if not is_confirm and not is_deny and len(prev_messages) > 0:
+            # 检查是否之前处于确认阶段（AI最后一条消息是确认请求）
+            ai_msgs = [msg for msg in conversation_history if msg['role'] == 'assistant']
+            if ai_msgs and ('请问以上识别是否正确' in ai_msgs[-1]['content'] or '识别是否正确' in ai_msgs[-1]['content']):
+                type_from_msg = self._extract_type_by_keyword(last_user_msg)
+                module_from_msg = self._extract_module_by_keyword(last_user_msg)
+                if type_from_msg or module_from_msg:
+                    is_confirm = True  # 视为已确认
+                    info['type_confirmed'] = True
+
+        # 如果是明确确认，设置确认状态
         if is_confirm and not is_deny:
             info['type_confirmed'] = True
-        
-        # ============== 强制：第一步读取知识库并分析 ==============
+
+        # ============== 确定最终需求文本 ==============
+        # 如果是确认阶段的用户回复，使用原始需求 + 用户当前输入的信息
+        if info['type_confirmed'] and original_requirement:
+            # 用户可能在确认时补充了信息，需要提取类型/模块并合并
+            requirement_text = original_requirement
+            # 追加用户的纠正信息
+            if last_user_msg != original_requirement:
+                correction = last_user_msg.strip()
+                # 过滤掉纯确认词
+                pure_confirm = all(kw in correction for kw in ['是']) and len(correction) <= 20
+                if not pure_confirm or self._extract_type_by_keyword(correction) or self._extract_module_by_keyword(correction):
+                    requirement_text = f"{original_requirement} {correction}"
+        else:
+            # 新需求：使用最后一条有意义的需求描述
+            requirement_text = last_user_msg if self._is_requirement_description(last_user_msg) else original_requirement
+
+        # 检查是否是需求描述
+        if not requirement_text or not self._is_requirement_description(requirement_text):
+            return info
+
+        info['requirement'] = requirement_text.strip()
+
+        # ============== 提取类型/模块（从用户最新输入优先） ==============
+        # 如果是确认阶段的纠正回复，优先从最后一条消息提取
+        if info['type_confirmed'] and len(prev_messages) > 0:
+            type_from_last = self._extract_type_by_keyword(last_user_msg)
+            module_from_last = self._extract_module_by_keyword(last_user_msg)
+            if type_from_last:
+                info['type'] = type_from_last
+                info['auto_detected']['type'] = True
+            if module_from_last:
+                info['module'] = module_from_last
+                info['auto_detected']['module'] = True
+
+        # ============== 强制：读取知识库并分析 ==============
         kb_analysis = self._analyze_from_knowledge_base(requirement_text)
         info['kb_analysis'] = kb_analysis
-        
-        # 使用知识库分析结果（强制使用，置信度>=0.5即可）
+
+        # 使用知识库分析结果补充（不覆盖用户已确认的信息）
         if kb_analysis['confidence'] >= 0.5:
-            if kb_analysis['module']:
+            if kb_analysis['module'] and not info['module']:
                 info['module'] = kb_analysis['module']
                 info['auto_detected']['module'] = True
-            if kb_analysis['type']:
+            if kb_analysis['type'] and not info['type']:
                 info['type'] = kb_analysis['type']
                 info['auto_detected']['type'] = True
             if kb_analysis.get('related_features'):
                 info['related_features'] = kb_analysis['related_features']
-        
-        # ============== 第二步：规则匹配识别（作为知识库分析的补充）==============
-        
-        # 如果知识库未能识别模块，尝试规则匹配
+
+        # ============== 规则匹配（作为补充）==============
         if not info['module']:
             module_from_rule = self._extract_module_by_keyword(requirement_text)
             if module_from_rule:
                 info['module'] = module_from_rule
                 info['auto_detected']['module'] = True
-        
-        # 如果知识库未能识别类型，尝试规则匹配
+
         if not info['type']:
             type_from_rule = self._extract_type_by_keyword(requirement_text)
             if type_from_rule:
                 info['type'] = type_from_rule
                 info['auto_detected']['type'] = True
-        
-        # ============== 第三步：兜底处理（确保有默认值）==============
-        
-        # 如果模块仍未识别，使用默认值
+
+        # ============== 兜底 ==============
         if not info['module']:
             info['module'] = '未指定模块'
             info['auto_detected']['module'] = False
-        
-        # 如果类型仍未识别，默认视为新增功能
         if not info['type']:
             info['type'] = '新增功能'
             info['auto_detected']['type'] = False
-        
-        # 如果用户否认，清空已识别的信息，等待重新输入
+
+        # 如果用户否认，清空信息
         if is_deny:
             info['module'] = ''
             info['type'] = ''
             info['type_confirmed'] = False
             info['kb_analysis'] = None
             info['related_features'] = []
-        
+
         return info
     
     def check_info_complete(self, info: Dict) -> bool:

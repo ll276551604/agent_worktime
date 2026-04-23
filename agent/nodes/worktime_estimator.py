@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-节点2：工时估算
+节点2：工时估算（B端履约中台专用）
 - 输入：节点1的 pages_features（功能点列表，含开发类型）+ 知识库参照案例
-- B端履约中台专属：S/M/L/XL/XXL 五档 + 测试公式（后端×0.35）
+- S/M/L/XL/XXL 五档 + 测试公式（后端×0.35）
 - 输出：
     role_breakdown  — 各角色工时 dict
     total_days      — 合计天数
@@ -28,7 +28,7 @@ def estimate_worktime(state: dict) -> dict:
     if not pages_features:
         return _fallback_estimate(state)
 
-    skill_id = skill_config.get("id", "standard")
+    skill_id = skill_config.get("id", "b_end_fulfillment")
     print(f"[节点2] 工时估算 技能={skill_id} 功能点数={len(pages_features)}", flush=True)
 
     prompt = _build_prompt(req, pages_features, skill_config, examples, kb_cases)
@@ -58,66 +58,25 @@ def _build_prompt(req: dict, pages_features: list, skill_config: dict,
     detail  = (req.get("detail", "") or "")[:300]
 
     skill      = skill_config or {}
-    skill_id   = skill.get("id", "standard")
-    skill_name = skill.get("name", "标准产品评估")
-    roles      = skill.get("roles", ["产品/设计", "前端开发", "后端开发", "测试"])
+    roles      = skill.get("roles", ["产品", "前端开发", "后端开发", "测试"])
     est        = skill.get("estimation", {})
-    strategy   = est.get("strategy", "role_based")
 
     pages_text = json.dumps(pages_features, ensure_ascii=False, indent=2)
-
-    if strategy == "story_points":
-        rules_section = _build_story_point_rules(est, roles)
-    elif skill_id == "b_end_fulfillment":
-        rules_section = _build_b_end_rules(est, roles)
-    else:
-        rules_section = _build_role_based_rules(est, roles)
-
+    rules_section = _build_b_end_rules(est, roles)
     examples_section = _build_examples_section(examples, roles)
     kb_section = _build_kb_section(kb_cases)
 
     roles_example = {r: 0.5 for r in roles}
     roles_example_str = json.dumps(roles_example, ensure_ascii=False)
 
-    if skill_id == "b_end_fulfillment":
-        return _build_b_end_prompt(
-            module, feature, detail, pages_text, pages_features,
-            rules_section, examples_section, kb_section, roles, roles_example_str
-        )
-
-    return f"""你是 IT 产品经理，当前使用「{skill_name}」评估体系，根据页面/功能点拆解结果，估算各角色工时。
-{examples_section}
-## 需求背景
-- 功能模块：{module}
-- 需求名称：{feature}
-- 需求描述：{detail or '无'}
-
-## 页面与功能点拆解结果
-{pages_text}
-
-{rules_section}
-
-## 输出角色
-{"、".join(roles)}
-
-## 输出格式（严格 JSON，禁止代码块）
-{{
-  "role_breakdown": {roles_example_str},
-  "total_days": 2.0,
-  "g_text": "【页面名-新增】功能点1、功能点2\\n【页面名2-调整】功能点3\\n\\n各角色工时：产品/设计0.5天 前端1.0天 后端1.0天 测试0.5天\\n合计工时：2.0天",
-  "reason": "一句话说明估算依据"
-}}
-
-## G 列文本格式规则
-- 每页面/故事一行：【名称-新增/调整】功能点1、功能点2、...
-- 末尾空一行后：各角色工时：角色1 X天 角色2 X天 ...
-- 最后一行：合计工时：X天（X 精确到 0.5）
-- 换行用 \\n，不要其他格式
-- 只输出 JSON，不要任何其他内容"""
+    return _build_prompt_text(
+        module, feature, detail, pages_text, pages_features,
+        rules_section, examples_section, kb_section, roles, roles_example_str
+    )
 
 
-def _build_b_end_prompt(module, feature, detail, pages_text, pages_features,
-                         rules_section, examples_section, kb_section, roles, roles_example_str) -> str:
+def _build_prompt_text(module, feature, detail, pages_text, pages_features,
+                        rules_section, examples_section, kb_section, roles, roles_example_str) -> str:
     """B端履约中台专属 prompt：输出3张表 + 风险提示"""
     role_names = "、".join(roles)
     zero_patterns = "复用现有功能/链路 | 已有功能无改造 | 标品支持不涉及定制"
@@ -237,59 +196,6 @@ def _build_b_end_rules(est: dict, roles: list) -> str:
     return "\n".join(lines)
 
 
-def _build_role_based_rules(est: dict, roles: list) -> str:
-    base_rates = est.get("base_rates", {})
-    bonuses    = est.get("complexity_bonuses", {})
-
-    lines = ["## 工时估算规则（按角色）"]
-    if base_rates:
-        lines.append("### 基础工时参考（天/页面）")
-        for level, rates in base_rates.items():
-            r_str = " ".join(f"{role}={v}天" for role, v in rates.items() if role in roles)
-            lines.append(f"- {level}：{r_str}")
-    else:
-        lines.append("- 新增页面（简单）：前端 0.5天，后端 0.3天，测试 0.3天")
-        lines.append("- 新增页面（中等）：前端 1.0天，后端 0.8天，测试 0.5天")
-        lines.append("- 新增页面（复杂）：前端 1.5天，后端 1.5天，测试 1.0天")
-        lines.append("- 调整页面：约为新增页面的 30%~50%")
-
-    if bonuses:
-        lines.append("### 复杂度加成（各角色均加）")
-        for name, info in bonuses.items():
-            if isinstance(info, dict):
-                lines.append(f"- {name}：+{info.get('加成天数', 0.2)}天（{info.get('说明', '')}）")
-            else:
-                lines.append(f"- {name}：+{info}天")
-
-    lines.append("### 估算原则")
-    lines.append("- total_days 精确到 0.5，范围 0.5~20 天")
-    lines.append("- total_days = sum(role_breakdown.values())")
-    lines.append("- 先判断页面复杂度（简单/中等/复杂），再套用基础工时+加成")
-    return "\n".join(lines)
-
-
-def _build_story_point_rules(est: dict, roles: list) -> str:
-    point_scale    = est.get("point_scale", [1, 2, 3, 5, 8, 13])
-    days_per_point = est.get("days_per_point", 0.8)
-    role_ratios    = est.get("role_ratios", {})
-    guidance       = est.get("point_guidance", {})
-
-    lines = ["## 工时估算规则（故事点）"]
-    lines.append(f"- 故事点范围：{point_scale}")
-    lines.append(f"- 每故事点 = {days_per_point} 天")
-    if guidance:
-        lines.append("### 故事点参考")
-        for pt, desc in guidance.items():
-            lines.append(f"  - {pt}点：{desc}")
-    if role_ratios:
-        lines.append("### 角色工时分配比例")
-        for role, ratio in role_ratios.items():
-            if role in roles:
-                lines.append(f"  - {role}：{int(ratio*100)}%")
-    lines.append("- total_days = sum(所有故事点) × days_per_point，精确到 0.5")
-    return "\n".join(lines)
-
-
 def _build_examples_section(examples: list, roles: list) -> str:
     if not examples:
         return ""
@@ -334,7 +240,6 @@ def _build_kb_section(kb_cases: list) -> str:
 def _parse(raw_text: str, pages_features: list, skill_config: dict, kb_cases: list):
     """返回 (g_text, total_days, role_breakdown)"""
     text = re.sub(r'```(?:json)?\s*', '', raw_text).replace('```', '').strip()
-    skill_id = (skill_config or {}).get("id", "standard")
     try:
         data = json.loads(text)
 
@@ -348,7 +253,7 @@ def _parse(raw_text: str, pages_features: list, skill_config: dict, kb_cases: li
         g_text = str(data.get("g_text", "")).replace("\\n", "\n").strip()
         if not g_text:
             feature_rows = data.get("feature_rows", [])
-            if skill_id == "b_end_fulfillment" and feature_rows:
+            if feature_rows:
                 g_text = _format_b_end(feature_rows, role_breakdown, total_days, kb_cases)
             else:
                 g_text = _format_fallback(pages_features, role_breakdown, total_days, skill_config)
@@ -429,7 +334,7 @@ def _format_fallback(pages_features: list, role_breakdown: dict, total_days: flo
 
 
 def _fallback_format(pages_features: list, skill_config: dict, kb_cases: list = None):
-    roles = (skill_config or {}).get("roles", ["产品/设计", "前端开发", "后端开发", "测试"])
+    roles = (skill_config or {}).get("roles", ["产品", "前端开发", "后端开发", "测试"])
     total_days = max(0.5, len(pages_features) * 1.0)
     total_days = _round_half(total_days)
 
@@ -447,7 +352,7 @@ def _fallback_estimate(state: dict) -> dict:
     model_id = state.get("model_id")
     prompt   = gemini_client.build_prompt(req)
     skill_config = state.get("skill_config", {})
-    roles = skill_config.get("roles", ["产品/设计", "前端开发", "后端开发", "测试"])
+    roles = skill_config.get("roles", ["产品", "前端开发", "后端开发", "测试"])
 
     try:
         raw    = gemini_client.call_llm(prompt, model_id=model_id)

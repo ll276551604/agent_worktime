@@ -34,6 +34,7 @@ class ChatSession:
         self.last_active = time.time()
         self.metadata: Dict = {}  # 存储额外信息如当前处理的文件ID等
         self.last_evaluation: Dict = {}  # 存储上次评估结果，用于反馈重新评估
+        self.dialog_state: Dict = {}     # 对话状态: {in_confirm_stage, confirmed_fields, original_requirement}
 
     def add_message(self, role: str, content: str) -> ChatMessage:
         """添加消息"""

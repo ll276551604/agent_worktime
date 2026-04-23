@@ -346,6 +346,85 @@
       word-break: break-word;
     }
 
+    /* 评估结果结构化样式 */
+    .eval-block {
+      margin-bottom: 16px;
+    }
+    .eval-block:last-child {
+      margin-bottom: 0;
+    }
+    .eval-section {
+      margin-bottom: 14px;
+    }
+    .eval-section:last-child {
+      margin-bottom: 0;
+    }
+    .eval-section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+      padding: 6px 10px;
+      background: var(--muted);
+      border-radius: calc(var(--radius) - 2px);
+      margin-bottom: 8px;
+      border-left: 3px solid var(--primary);
+    }
+    .eval-section-content {
+      padding: 0 4px;
+      font-size: 13px;
+      line-height: 1.8;
+      color: var(--fg);
+    }
+    .eval-section-content pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: inherit;
+      font-size: inherit;
+      line-height: inherit;
+    }
+    .eval-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .eval-header-badge {
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 99px;
+      background: oklch(0.93 0.04 240);
+      color: oklch(0.42 0.18 240);
+    }
+    .eval-header-badge.module {
+      background: oklch(0.93 0.06 145);
+      color: oklch(0.38 0.12 145);
+    }
+    .eval-header-badge.type {
+      background: oklch(0.94 0.04 260);
+      color: oklch(0.45 0.10 260);
+    }
+    html.dark .eval-header-badge {
+      background: oklch(0.22 0.06 240);
+      color: oklch(0.72 0.15 240);
+    }
+    html.dark .eval-header-badge.module {
+      background: oklch(0.20 0.06 145);
+      color: oklch(0.68 0.12 145);
+    }
+    html.dark .eval-header-badge.type {
+      background: oklch(0.22 0.05 260);
+      color: oklch(0.72 0.10 260);
+    }
+    .eval-divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 14px 0;
+    }
+
     .message-meta {
       font-size: 11px;
       color: var(--muted-fg);
@@ -1033,10 +1112,14 @@
       // 如果有已填写的内容，询问用户是否覆盖
       if (fileFilledCount > 0 && data.total > 0) {
         setFileDisplay(data.filename, `${data.total} 行需求（${fileFilledCount} 行已填写）`);
-        const confirmText = `检测到表格中有 ${fileFilledCount} 行已填写了评估内容，请问需要覆盖这些内容吗？`;
+        const confirmText = `检测到表格中有 ${fileFilledCount} 行已填写了评估内容，请问需要覆盖这些内容吗？请回复"覆盖"或"跳过"`;
         addMessage('ai', confirmText);
         scrollBottom();
-        // 等待用户确认，不启用发送按钮
+        // 等待用户确认：保持文本输入可用，但不启用发送按钮
+        document.getElementById('text-input').classList.remove('hidden');
+        document.getElementById('text-input').focus();
+        document.getElementById('text-input').placeholder = '请回复"覆盖"或"跳过"...';
+        document.getElementById('btn-send').disabled = false;
       } else {
         setFileDisplay(data.filename, `${data.total} 行需求`);
         document.getElementById('btn-send').disabled = false;
@@ -1134,46 +1217,123 @@
     } else {
       // 文本处理流程（智能引导对话）
       const messageText = document.querySelector('.message.user:last-child .message-content').textContent;
+      let resp;
       try {
-        const resp = await fetch('/chat', {
+        // 设置 90 秒超时，防止请求永久挂起
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+        resp = await fetch('/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             session_id: currentSessionId,
-            message: messageText, 
+            message: messageText,
             model_id: selectedModel
           }),
+          signal: controller.signal,
         });
-        const data = await resp.json();
+        clearTimeout(timeoutId);
+      } catch (e) {
         hideThinking();
         processingFile = false;
-        
-        if (data.error) { 
-          showError(data.error); 
-          addMessage('ai', `处理失败：${data.error}`);
-          scrollBottom();
-          document.getElementById('btn-send').disabled = false;
-          return; 
+        if (e.name === 'AbortError') {
+          showError('请求超时，请稍后重试');
+        } else {
+          showError('网络请求失败：' + e.message);
         }
-        
-        // 更新会话ID
-        currentSessionId = data.session_id;
-        localStorage.setItem('wt_session_id', currentSessionId);
-        
-        // 获取统一输出格式
-        const output = data.output || {};
-        const meta = data.meta || {};
-        const process = meta.process || [];
-        
-        // 根据输出类型处理响应（前端只负责展示，不关心业务逻辑）
-        if (output.type === 'text') {
-          // 文本消息：闲聊、收集信息、追问等（不显示 process）
-          addMessage('ai', output.content);
-        } else if (output.type === 'evaluation') {
-          // 评估结果：正常评估或重新评估（不显示 process）
-          const content = output.content || {};
-          const info = meta.collected_info || {};
-          
+        document.getElementById('btn-send').disabled = false;
+        return;
+      }
+
+      // 检查 HTTP 状态
+      if (!resp.ok) {
+        hideThinking();
+        processingFile = false;
+        let errText = '请求失败';
+        try {
+          const errData = await resp.json();
+          errText = errData.error || errText;
+        } catch {
+          errText = `请求失败 (HTTP ${resp.status})`;
+        }
+        showError(errText);
+        document.getElementById('btn-send').disabled = false;
+        return;
+      }
+
+      // 解析响应并处理
+      let data;
+      try {
+        data = await resp.json();
+      } catch (e) {
+        hideThinking();
+        processingFile = false;
+        showError('响应解析失败，请稍后重试');
+        document.getElementById('btn-send').disabled = false;
+        return;
+      }
+
+      hideThinking();
+      processingFile = false;
+
+      if (data.error) {
+        showError(data.error);
+        addMessage('ai', `处理失败：${data.error}`);
+        scrollBottom();
+        document.getElementById('btn-send').disabled = false;
+        return;
+      }
+
+      // 更新会话ID
+      currentSessionId = data.session_id;
+      localStorage.setItem('wt_session_id', currentSessionId);
+
+      // 获取统一输出格式
+      const output = data.output || {};
+      const meta = data.meta || {};
+
+      // 根据输出类型处理响应（前端只负责展示，不关心业务逻辑）
+      if (output.type === 'text') {
+        // 文本消息：闲聊、收集信息、追问等（不显示 process）
+        addMessage('ai', output.content);
+      } else if (output.type === 'evaluation') {
+        // 评估结果：正常评估或重新评估（不显示 process）
+        const content = output.content || {};
+        const info = meta.collected_info || {};
+
+        lastEvaluationResult = {
+          results: [{
+            original_requirement: {
+              module: info.module || '',
+              feature: info.requirement?.split('\n')[0] || '',
+              detail: info.requirement || ''
+            },
+            analysis: {
+              judgment: info.type || '未知',
+              confidence: info.confidence || 0.8,
+              related_modules: info.related_modules || [],
+              existing_features: info.existing_features || [],
+              suggestions: info.suggestions || []
+            },
+            decomposition: content.decomposition || [],
+            evaluation: content.evaluation || {},
+          }],
+          total_days: content.evaluation?.effort_days || content.total_days || 0,
+          requirement_count: 1,
+        };
+        document.getElementById('btn-export-eval').classList.remove('hidden');
+        addMessage('ai', formatEvaluationResult({...data, ...content}));
+        clearProgressIndicator();
+      } else if (output.type === 'thinking') {
+        // 思考状态：显示进度
+        showProgress(output.content);
+      } else if (output.type === 'error') {
+        // 错误处理
+        showError(output.content);
+      } else if (data.stage) {
+        // 向下兼容：处理旧格式（如果有）
+        if (data.stage === 'assessment' || data.stage === 'reassessment') {
+          const info = data.collected_info || {};
           lastEvaluationResult = {
             results: [{
               original_requirement: {
@@ -1188,63 +1348,22 @@
                 existing_features: info.existing_features || [],
                 suggestions: info.suggestions || []
               },
-              decomposition: content.decomposition || [],
-              evaluation: content.evaluation || {},
+              decomposition: data.decomposition || [],
+              evaluation: data.evaluation || {},
             }],
-            total_days: content.evaluation?.effort_days || content.total_days || 0,
+            total_days: data.evaluation?.effort_days || data.total_days || 0,
             requirement_count: 1,
           };
           document.getElementById('btn-export-eval').classList.remove('hidden');
-          addMessage('ai', formatEvaluationResult({...data, ...content}));
+          addMessage('ai', formatEvaluationResult(data), formatProcess(data.process));
           clearProgressIndicator();
-        } else if (output.type === 'thinking') {
-          // 思考状态：显示进度
-          showProgress(output.content);
-        } else if (output.type === 'error') {
-          // 错误处理
-          showError(output.content);
+        } else {
+          addMessage('ai', data.formatted_result || data.message || '暂无回复', formatProcess(data.process));
         }
-        
-        // 向下兼容：处理旧格式（如果有）
-        else if (data.stage) {
-          // 旧格式处理（保持兼容）
-          if (data.stage === 'assessment' || data.stage === 'reassessment') {
-            const info = data.collected_info || {};
-            lastEvaluationResult = {
-              results: [{
-                original_requirement: {
-                  module: info.module || '',
-                  feature: info.requirement?.split('\n')[0] || '',
-                  detail: info.requirement || ''
-                },
-                analysis: {
-                  judgment: info.type || '未知',
-                  confidence: info.confidence || 0.8,
-                  related_modules: info.related_modules || [],
-                  existing_features: info.existing_features || [],
-                  suggestions: info.suggestions || []
-                },
-                decomposition: data.decomposition || [],
-                evaluation: data.evaluation || {},
-              }],
-              total_days: data.evaluation?.effort_days || data.total_days || 0,
-              requirement_count: 1,
-            };
-            document.getElementById('btn-export-eval').classList.remove('hidden');
-            addMessage('ai', formatEvaluationResult(data), formatProcess(data.process));
-            clearProgressIndicator();
-          } else {
-            addMessage('ai', data.formatted_result || data.message || '暂无回复', formatProcess(data.process));
-          }
-        }
-        
-        scrollBottom();
-        document.getElementById('btn-send').disabled = false;
-      } catch (e) {
-        showError('启动失败：' + e.message);
-        hideThinking();
-        processingFile = false;
       }
+
+      scrollBottom();
+      document.getElementById('btn-send').disabled = false;
     }
   }
 
@@ -1257,11 +1376,14 @@
   }
 
   function formatEvaluationResult(data) {
+    // 优先使用后端返回的详细 G 列文本
+    if (data.g_text) return data.g_text;
+
+    // 降级：结构化数据组装
     let result = `【需求分析】\n`;
-    // 从 collected_info 中获取分析信息
     const info = data.collected_info || {};
     const judgment = info.type || '未知';
-    const confidence = info.confidence || 0.8; // 默认置信度
+    const confidence = info.confidence || 0.8;
     result += `类型: ${judgment}（置信度: ${Math.round(confidence * 100)}%）\n\n`;
 
     if (info.related_modules && info.related_modules.length > 0) {
@@ -1276,9 +1398,7 @@
       data.decomposition.forEach(part => {
         result += `【${part.type}】${part.name}\n`;
         if (part.features && part.features.length > 0) {
-          part.features.forEach(feat => {
-            result += `  - ${feat}\n`;
-          });
+          part.features.forEach(feat => { result += `  - ${feat}\n`; });
         }
       });
     } else {
@@ -1293,12 +1413,9 @@
       result += `预估工时: ${data.total_days || 0} 天\n`;
     }
 
-    // 添加建议信息（如果有的话）
     if (info.suggestions && info.suggestions.length > 0) {
       result += `\n【建议】\n`;
-      info.suggestions.forEach(suggestion => {
-        result += `• ${suggestion}\n`;
-      });
+      info.suggestions.forEach(s => { result += `• ${s}\n`; });
     }
 
     return result;
@@ -1308,14 +1425,99 @@
     const container = document.getElementById('messages-container');
     const message = document.createElement('div');
     message.className = `message ${role}`;
+
+    let contentHtml;
+    if (role === 'ai' && isEvaluationResult(content)) {
+      contentHtml = formatEvaluationHtml(content);
+    } else {
+      contentHtml = `<div class="message-content">${esc(content)}</div>`;
+    }
+
     message.innerHTML = `
       <div class="message-avatar">${role === 'user' ? '我' : 'AI'}</div>
       <div class="message-bubble">
-        <div class="message-content">${esc(content)}</div>
+        ${contentHtml}
         ${meta ? `<div class="message-meta"><pre>${esc(meta)}</pre></div>` : ''}
       </div>
     `;
     container.appendChild(message);
+  }
+
+  // 检测是否为评估结果
+  function isEvaluationResult(text) {
+    if (!text) return false;
+    // 评估结果包含特征性标题
+    return text.includes('【智能识别】') ||
+           text.includes('【参照案例】') ||
+           text.includes('【功能点拆解】') ||
+           text.includes('【工时评估】');
+  }
+
+  // 将评估结果格式化为结构化 HTML
+  function formatEvaluationHtml(text) {
+    // 提取智能识别头部信息
+    let headerHtml = '';
+    let bodyText = text;
+
+    // 提取智能识别头部
+    const headerMatch = text.match(/^【智能识别】(.+?)\n\n/);
+    if (headerMatch) {
+      const headerInfo = headerMatch[1];
+      const moduleMatch = headerInfo.match(/模块：(.+?)(?:、|$)/);
+      const typeMatch = headerInfo.match(/类型：(.+)/);
+
+      let badges = '';
+      if (moduleMatch) badges += `<span class="eval-header-badge module">模块: ${esc(moduleMatch[1].trim())}</span>`;
+      if (typeMatch) badges += `<span class="eval-header-badge type">类型: ${esc(typeMatch[1].trim())}</span>`;
+      if (badges) headerHtml = `<div class="eval-header">${badges}</div>`;
+      bodyText = text.substring(headerMatch[0].length);
+    }
+
+    // 按【xxx】标题分块
+    const sectionRegex = /【(.+?)】/g;
+    const sections = [];
+    let lastIdx = 0;
+    let match;
+
+    while ((match = sectionRegex.exec(bodyText)) !== null) {
+      // 如果有前置内容（无标题的纯文本）
+      if (match.index > lastIdx) {
+        const prefix = bodyText.substring(lastIdx, match.index).trim();
+        if (prefix) sections.push({ title: null, content: prefix });
+      }
+      sections.push({ title: match[1], content: '' });
+      lastIdx = match.index + match[0].length;
+    }
+
+    // 最后一个 section 的 content
+    const remaining = bodyText.substring(lastIdx).trim();
+    if (remaining && sections.length > 0) {
+      sections[sections.length - 1].content = remaining;
+    } else if (remaining) {
+      sections.push({ title: null, content: remaining });
+    }
+
+    // 构建 HTML
+    let html = headerHtml;
+    const knownSections = ['智能识别', '参照案例', '功能点拆解', '功能点拆解表', '工时评估', '工时评估表', '风险提示', '风险提示表'];
+
+    sections.forEach((section, i) => {
+      if (section.title && knownSections.includes(section.title)) {
+        html += `<div class="eval-section">`;
+        html += `<div class="eval-section-title">${esc(section.title)}</div>`;
+        html += `<div class="eval-section-content"><pre>${esc(section.content)}</pre></div>`;
+        html += `</div>`;
+      } else if (section.title) {
+        html += `<div class="eval-section">`;
+        html += `<div class="eval-section-title">${esc(section.title)}</div>`;
+        html += `<div class="eval-section-content"><pre>${esc(section.content)}</pre></div>`;
+        html += `</div>`;
+      } else {
+        html += `<div class="eval-section"><div class="eval-section-content"><pre>${esc(section.content)}</pre></div></div>`;
+      }
+    });
+
+    return `<div class="eval-block">${html}</div>`;
   }
 
   function addResultMessage(g_text, total_days, page_count) {

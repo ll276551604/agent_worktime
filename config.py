@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import re
 import time
 from dotenv import load_dotenv
 
@@ -37,20 +38,42 @@ class APIConfig:
             raise ValueError(f"不支持的提供商: {provider}")
 
 
+# ============================================================
+# 多路径解析工具（支持分号分隔的多个目录，Windows 兼容）
+# ============================================================
+
+def _parse_multi_path(env_value: str) -> list:
+    """将分号分隔的路径字符串解析为路径列表，自动过滤空值和无效目录"""
+    if not env_value:
+        return []
+    paths = [p.strip() for p in re.split(r'[;|]', env_value)]
+    return [p for p in paths if p and os.path.isdir(p)]
+
+
+def _parse_first_path(env_value: str, default: str = None) -> str:
+    """兼容旧版单路径语义，返回第一个有效路径或默认值"""
+    paths = _parse_multi_path(env_value)
+    return paths[0] if paths else (default or "")
+
+
 class AppConfig:
     """应用配置"""
-    
+
     # 路径配置
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
     OUTPUT_FOLDER = os.path.join(BASE_DIR, "outputs")
     KNOWLEDGE_DIR = os.path.join(BASE_DIR, "knowledge")
 
-    # 外部知识库路径（从 .env 读取；留空则使用项目内默认目录）
-    BUSINESS_KB_DIR = (os.environ.get("BUSINESS_KB_DIR") or "").strip() \
-                      or os.path.join(BASE_DIR, "knowledge", "business")
-    CODE_KB_EXT_DIR = (os.environ.get("CODE_KB_DIR") or "").strip()      # 外部代码KB（可选追加）
-    JAVA_SOURCE_DIR = (os.environ.get("JAVA_SOURCE_DIR") or "").strip()   # Java源码目录（可选）
+    # 外部知识库路径（从 .env 读取；支持分号分隔多个目录）
+    BUSINESS_KB_DIRS = _parse_multi_path(os.environ.get("BUSINESS_KB_DIR", "")) \
+                       or [os.path.join(BASE_DIR, "knowledge", "business")]
+    BUSINESS_KB_DIR = BUSINESS_KB_DIRS[0]  # 兼容旧版单路径引用
+    CODE_KB_EXT_DIRS = _parse_multi_path(os.environ.get("CODE_KB_DIR", ""))
+    JAVA_SOURCE_DIRS = _parse_multi_path(os.environ.get("JAVA_SOURCE_DIR", ""))
+    # 兼容旧版单路径
+    CODE_KB_EXT_DIR = CODE_KB_EXT_DIRS[0] if CODE_KB_EXT_DIRS else ""
+    JAVA_SOURCE_DIR = JAVA_SOURCE_DIRS[0] if JAVA_SOURCE_DIRS else ""
     
     # 文件限制
     MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
@@ -158,8 +181,11 @@ REQUEST_DELAY = 0.5
 
 KNOWLEDGE_DIR     = AppConfig.KNOWLEDGE_DIR
 BUSINESS_KB_DIR   = AppConfig.BUSINESS_KB_DIR
+BUSINESS_KB_DIRS  = AppConfig.BUSINESS_KB_DIRS
 CODE_KB_EXT_DIR   = AppConfig.CODE_KB_EXT_DIR
+CODE_KB_EXT_DIRS  = AppConfig.CODE_KB_EXT_DIRS
 JAVA_SOURCE_DIR   = AppConfig.JAVA_SOURCE_DIR
+JAVA_SOURCE_DIRS  = AppConfig.JAVA_SOURCE_DIRS
 KB_FEATURE_RULES  = os.path.join(AppConfig.KNOWLEDGE_DIR, "rules", "feature_rules.json")
 KB_WORKTIME_RULES = os.path.join(AppConfig.KNOWLEDGE_DIR, "rules", "worktime_rules.json")
 KB_SYSTEM_CAPS    = os.path.join(AppConfig.KNOWLEDGE_DIR, "system_caps.json")

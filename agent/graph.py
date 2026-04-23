@@ -17,7 +17,7 @@ from langgraph.graph import StateGraph, END
 from agent.nodes.feature_rebuilder import rebuild_features
 from agent.nodes.worktime_estimator import estimate_worktime
 from agent.kb_utils import match_business_context  # noqa: F401
-from config import KB_FEATURE_RULES, KB_SYSTEM_CAPS, BUSINESS_KB_DIR
+from config import KB_FEATURE_RULES, KB_SYSTEM_CAPS, BUSINESS_KB_DIRS
 
 
 # ============================================================
@@ -102,38 +102,39 @@ class KnowledgeLoader:
 
     def _load_business_docs(self) -> list:
         docs = []
-        if not os.path.exists(BUSINESS_KB_DIR):
-            return docs
-        for fname in os.listdir(BUSINESS_KB_DIR):
-            fpath = os.path.join(BUSINESS_KB_DIR, fname)
-            if not os.path.isfile(fpath):
+        for kb_dir in BUSINESS_KB_DIRS:
+            if not os.path.exists(kb_dir):
                 continue
-            try:
-                with open(fpath, encoding="utf-8") as f:
-                    content = f.read()
-                lines     = content.split('\n')
-                meta      = lines[0] if lines else ""
-                domain    = self._extract(meta, r'domain:\s*(\S+)') or fname
-                subdomain = self._extract(meta, r'subdomain:\s*([^\s]+(?:\s+[^\s:]+)*?)(?=\s+\w+:)')
-                recall    = self._extract(meta, r'recall_when:\s*"([^"]+)"')
-                digest    = self._extract(meta, r'chapter_digest:\s*(.+?)(?=related_docs:|$)')
-                body      = '\n'.join(l for l in lines[5:65] if l.strip())
+            for fname in os.listdir(kb_dir):
+                fpath = os.path.join(kb_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                try:
+                    with open(fpath, encoding="utf-8") as f:
+                        content = f.read()
+                    lines     = content.split('\n')
+                    meta      = lines[0] if lines else ""
+                    domain    = self._extract(meta, r'domain:\s*(\S+)') or fname
+                    subdomain = self._extract(meta, r'subdomain:\s*([^\s]+(?:\s+[^\s:]+)*?)(?=\s+\w+:)')
+                    recall    = self._extract(meta, r'recall_when:\s*"([^"]+)"')
+                    digest    = self._extract(meta, r'chapter_digest:\s*(.+?)(?=related_docs:|$)')
+                    body      = '\n'.join(l for l in lines[5:65] if l.strip())
 
-                terms = set()
-                for t in [fname, domain, subdomain or "", recall or ""]:
-                    for w in re.split(r'[\s/·，。、]+', t):
-                        if len(w) >= 2:
-                            terms.add(w.lower())
+                    terms = set()
+                    for t in [fname, domain, subdomain or "", recall or ""]:
+                        for w in re.split(r'[\s/·，。、]+', t):
+                            if len(w) >= 2:
+                                terms.add(w.lower())
 
-                docs.append({
-                    "name": fname, "domain": domain,
-                    "subdomain": subdomain or "", "recall_when": recall or "",
-                    "digest": digest or "", "body": body,
-                    "match_terms": list(terms),
-                })
-                print(f"[KB] 加载业务文档：{fname}", flush=True)
-            except Exception as e:
-                print(f"[KB] 加载失败：{fname} - {e}", flush=True)
+                    docs.append({
+                        "name": fname, "domain": domain,
+                        "subdomain": subdomain or "", "recall_when": recall or "",
+                        "digest": digest or "", "body": body,
+                        "match_terms": list(terms),
+                    })
+                    print(f"[KB] 加载业务文档：{fname}", flush=True)
+                except Exception as e:
+                    print(f"[KB] 加载失败：{fname} - {e}", flush=True)
         return docs
 
     def _extract(self, text: str, pattern: str) -> str:

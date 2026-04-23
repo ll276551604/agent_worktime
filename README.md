@@ -1,21 +1,60 @@
 # AI 工时评估助手
 
-基于大语言模型的 B 端履约中台工时评估工具。通过对话引导用户描述需求，自动完成知识库检索、功能点拆解、四端工时估算，输出可直接用于项目报价的评估结果。
+## 项目概览
 
-## 核心能力
+基于大语言模型的 B 端履约中台工时评估工具。通过对话描述需求，自动完成知识库检索、功能点拆解、四端工时估算，输出可直接用于项目报价的评估结果。
 
-- **知识库驱动**：内置 57 条 B 端履约中台历史案例，每次评估自动召回最相似的 1~3 条作为参照基准
-- **智能需求识别**：强制读取业务知识库和代码知识库，自动判断新增/调整需求类型
-- **需求类型确认**：识别需求类型后先询问用户确认，确认后再进行拆解评估
-- **智能追问机制**：基于 AI 理解动态生成追问问题，而非预设固定问题
-- **3 步评估流程**：知识库检索 → 功能点拆解（含开发类型分类）→ 四端工时估算
-- **四端分角色输出**：产品 / 前端 / 后端 / 测试，后端工时 × 0.35 自动计算测试工时
-- **S/M/L/XL/XXL 分级规则**：每个角色独立的五档工时标准，含复杂度加分项
-- **置信度标注**：有参照案例正常输出，类似场景推算标注 ⚠️，全新领域标注 ❓
-- **Excel 批量处理**：上传需求清单 Excel，批量评估并回填结果
-- **智能导入流程**：自动检测已填写内容，询问用户是否覆盖
-- **多技能体系**：支持切换评估技能（B端履约中台 / 标准产品 / 敏捷故事点）
-- **多轮对话**：支持追问和上下文记忆
+**核心能力：**
+
+- **知识库驱动**：内置 57 条历史案例，自动召回相似案例作为参照
+- **多源知识检索**：业务知识库 + 代码知识库 + Java 源码扫描
+- **智能拆解 & 估算**：LangGraph 流程，页面 × 功能点 → S/M/L/XL/XXL 四端工时
+- **四端分角色输出**：产品 / 前端 / 后端 / 测试，测试工时 = 后端 × 0.35
+- **Excel 批量处理**：上传需求清单，批量评估并回填结果
+- **多模型 & 会话管理**：6 种 LLM 可切换，多轮对话上下文记忆
+
+## 项目结构
+
+```
+agent_worktime/
+├── agent/                          # 核心评估引擎
+│   ├── nodes/
+│   │   ├── feature_rebuilder.py    #   图节点1：需求拆解为页面 × 功能点
+│   │   ├── worktime_estimator.py   #   图节点2：S/M/L/XL/XXL 四端工时估算
+│   │   └── reviewer.py             #   需求质量审核（已实现，暂未接入图）
+│   ├── dialog_manager.py           #   意图识别、需求提取、智能追问
+│   ├── evaluation_models.py        #   5种评估模型：FPA / COCOMO / 故事点 / 规则 / 综合
+│   ├── gemini_client.py            #   LLM 调用封装（DashScope + Gemini）
+│   ├── graph.py                    #   LangGraph StateGraph 定义
+│   ├── java_scanner.py             #   Java 源码扫描（Controller/Entity/Service）
+│   ├── kb_utils.py                 #   业务知识上下文匹配
+│   ├── knowledge_manager.py        #   知识库加载与需求分析
+│   ├── session_manager.py          #   会话管理（自动过期清理）
+│   ├── skill_manager.py            #   技能加载、案例检索、代码知识
+│   └── worktime_agent.py           #   主评估入口：对话评估 / 批量处理 / Excel导出
+├── excel/
+│   ├── reader.py                   # Excel 需求读取（支持多种表名/合并单元格）
+│   └── writer.py                   # Excel 结果回填（G列文本 + N列数字）
+├── knowledge/                      # 知识库
+│   ├── b_end_fulfillment/
+│   │   └── kb_cases.json           #   57 条历史案例（8大类别）
+│   ├── business/                   #   业务知识库目录
+│   ├── code_knowledge/             #   代码知识库目录
+│   ├── examples/                   #   技能 few-shot 案例
+│   ├── rules/                      #   功能点拆解 & 工时评估规则
+│   ├── skills/                     #   技能配置（角色/分级/加分项）
+│   └── system_caps.json            #   系统已有能力描述
+├── prompts/
+│   └── guiding_prompt.txt          # 引导对话 prompt
+├── templates/
+│   └── index.html                  # 前端页面（暗色模式/会话管理/SSE流式）
+├── docs/                           # 架构设计与产品路线图
+├── tests/                          # 单元测试
+├── app.py                          # Flask 应用入口（API 路由）
+├── config.py                       # 配置（模型/路径/评估参数）
+├── start.sh                        # 一键启动脚本
+└── requirements.txt
+```
 
 ## 快速开始
 
@@ -46,25 +85,10 @@ DASHSCOPE_API_KEY=your_dashscope_key
 
 ### 对话评估
 
-在输入框直接描述需求，系统会：
-1. 自动读取知识库进行需求类型判断（新增/调整）
-2. 显示识别结果并询问用户确认
-3. 用户确认后进入正式评估流程
+在输入框直接描述需求，系统会自动进入评估流程。
 
 **输入示例：**
 > 新增经销商账期预警功能：当应收账款超过账期时自动触发预警，支持预警规则可配置（阈值、触发条件）；向销售员发送企业微信消息；提供预警记录查询页面，支持导出。
-
-**确认阶段输出：**
-```
-根据您的需求描述，结合知识库分析，我识别到：
-
-【需求描述】新增经销商账期预警功能...
-【业务模块】订单管理
-【需求类型】新增功能
-【分析来源】基于业务知识库和代码知识库分析
-
-请问以上识别是否正确？如果不正确，请告诉我正确的模块和类型~
-```
 
 **评估输出示例：**
 ```
@@ -90,75 +114,14 @@ DASHSCOPE_API_KEY=your_dashscope_key
 
 ### Excel 批量处理
 
-1. 准备 `.xlsx` 文件，支持多种工作表名称（需求清单、需求拆解评估、工时评估表AI版本等）
+1. 准备 `.xlsx` 文件，支持多种工作表名称
 2. 点击上传按钮选择文件
 3. 系统自动检测已填写内容并询问是否覆盖
 4. 等待批量评估完成，下载回填结果
 
-**智能导入流程：**
-```
-上传文件 → 检测已填写内容 → 询问是否覆盖（覆盖/跳过）→ 开始评估
-```
-
 **支持的工作表名称：**
-- 需求清单
-- 需求拆解评估
-- 工时评估表AI版本
-- 工时评估表
-- 需求列表
-- 需求
-- Sheet1
-
-## 项目结构
-
-```
-agent_worktime/
-├── agent/
-│   ├── nodes/
-│   │   ├── feature_rebuilder.py   # 节点1：需求拆解（含知识库检索）
-│   │   ├── reviewer.py            # 节点2：评估结果审核
-│   │   └── worktime_estimator.py  # 节点3：工时估算（S/M/L/XL/XXL）
-│   ├── __init__.py
-│   ├── dialog_manager.py          # 对话管理（意图识别、状态追踪）
-│   ├── evaluation_models.py       # 评估数据模型
-│   ├── gemini_client.py           # LLM 调用封装
-│   ├── graph.py                   # LangGraph 状态图定义
-│   ├── java_scanner.py            # Java 代码扫描工具
-│   ├── kb_utils.py                # 知识库工具函数
-│   ├── knowledge_manager.py       # 知识库管理
-│   ├── session_manager.py         # 会话管理
-│   ├── skill_manager.py           # 技能管理（加载/切换/案例检索）
-│   └── worktime_agent.py          # 主评估入口
-├── knowledge/
-│   ├── b_end_fulfillment/
-│   │   └── kb_cases.json          # 57 条 B 端履约中台历史案例
-│   ├── business/                  # 业务领域知识
-│   ├── code_knowledge/            # 代码知识库
-│   ├── examples/                  # 各技能 few-shot 案例
-│   │   └── standard/
-│   ├── rules/
-│   │   ├── feature_rules.json     # 功能点拆解规则
-│   │   └── worktime_rules.json    # 工时评估规则
-│   ├── skills/
-│   │   ├── agile.json             # 敏捷故事点技能配置
-│   │   ├── b_end_fulfillment.json # B 端履约中台技能配置
-│   │   └── standard.json          # 标准产品评估技能配置
-│   └── system_caps.json           # 系统已有能力描述
-├── prompts/
-│   └── guiding_prompt.txt         # 引导对话 prompt
-├── excel/
-│   ├── __init__.py
-│   ├── reader.py                  # Excel 读取
-│   └── writer.py                  # Excel 回填写入
-├── templates/
-│   └── index.html                 # 前端页面
-├── docs/                          # 文档目录
-├── tests/                         # 测试目录
-├── app.py                         # Flask 应用入口
-├── config.py                      # 配置（模型、路径、超时等）
-├── start.sh                       # 一键启动脚本
-└── requirements.txt
-```
+- 需求清单、需求拆解评估、工时评估表AI版本
+- 工时评估表、需求列表、需求、Sheet1
 
 ## 工时评估规则
 
@@ -225,7 +188,7 @@ Response: {
 }
 ```
 
-**流式接口（推荐）**
+**流式接口（SSE，推荐）**
 ```
 POST /chat/stream
 Body: { "message": "需求描述", "session_id": "xxx" }
@@ -236,36 +199,73 @@ Response: Server-Sent Events
   - type: error     # 错误信息
 ```
 
+### 模型列表
+```
+GET /models
+Response: 返回可用的 6 种 LLM 模型列表
+```
+
 ### Excel 批量评估
 ```
-POST /upload          # 上传文件，返回 task_id
-GET  /progress/<id>   # SSE 实时进度流
-GET  /download/<id>   # 下载评估结果
+POST /upload                # 上传 Excel 文件，返回 task_id
+POST /process               # 处理已上传文件
+GET  /progress/<task_id>    # SSE 实时进度流
+GET  /download/<filename>   # 下载评估结果
+POST /evaluate_batch        # 批量评估
+POST /export_evaluation     # 导出评估结果为 Excel
+```
+
+### 会话管理
+```
+POST /session/create        # 创建新会话
+GET  /session/<id>/history  # 获取会话历史消息
+DELETE /session/<id>/delete # 删除会话
 ```
 
 ### 技能管理
 ```
 GET  /skills                    # 列出所有技能
+GET  /skills/current            # 获取当前使用的技能
 POST /skills/switch             # 切换技能 { "skill_id": "xxx" }
 GET  /skills/<id>               # 获取技能详情
-GET  /skills/<id>/examples      # 获取历史案例
-POST /skills/<id>/examples      # 新增历史案例（用于积累团队经验数据）
+POST /skills/reload             # 重新加载技能配置
+GET  /skills/<id>/examples      # 获取历史案例列表
+POST /skills/<id>/examples      # 新增历史案例（积累团队经验）
 ```
 
-### 评估接口
+### 知识管理
+```
+GET  /knowledge/code            # 获取代码知识
+POST /knowledge/reload          # 重新加载知识库
+POST /knowledge/analyze         # 分析需求类型（新增/调整）
+```
+
+### 直接评估
 ```
 POST /evaluate        # 直接评估需求（跳过对话引导）
 ```
 
 ## 技能体系
 
-| 技能 ID | 名称 | 适用场景 |
-|---------|------|---------|
-| `b_end_fulfillment` | B端履约中台评估 | 标品定制化项目，含历史案例知识库（默认） |
-| `standard` | 标准产品评估 | 通用产品功能评估，按页面×功能点拆解 |
-| `agile` | 敏捷故事点评估 | 敏捷团队，使用斐波那契故事点估算 |
+当前内置技能：
 
-切换技能后，拆解策略、估算规则、历史案例均随之切换。
+| 技能 ID | 名称 | 说明 |
+|---------|------|------|
+| `b_end_fulfillment` | B端履约中台评估 | 标品定制化项目评估，含 57 条历史案例（默认） |
+
+技能配置包含：角色定义、S/M/L/XL/XXL 分级规则、复杂度加分项、零工时场景等。可通过 `POST /skills/reload` 热重载配置。
+
+## 评估模型
+
+系统内置 5 种评估模型（`evaluation_models.py`）：
+
+| 模型 | 方法 | 说明 |
+|------|------|------|
+| FunctionPoint | Albrecht FPA | 基于 EI/EO/EQ/ILF/EIF 的功能点分析 |
+| COCOMO | COCOMO II | 基于规模的参数化估算 Effort = A × Size^B × EAF |
+| StoryPoint | 斐波那契数列 | 敏捷团队故事点（1/2/3/5/8/13） |
+| RuleBased | 规则匹配 | 基于知识库预定义规则 |
+| Composite | 加权综合 | FPA(0.35) + COCOMO(0.25) + StoryPoint(0.20) + RuleBased(0.20) |
 
 ## 注意事项
 
@@ -273,3 +273,4 @@ POST /evaluate        # 直接评估需求（跳过对话引导）
 - 涉及第三方系统对接时，建议接口文档确认后由研发复核后端工时
 - 可通过 `POST /skills/b_end_fulfillment/examples` 持续积累团队历史案例，提升评估准确性
 - 使用前需在 `.env` 中配置有效的 API Key
+- `reviewer.py`（需求质量审核节点）已实现但暂未接入 LangGraph 流程

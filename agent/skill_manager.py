@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-技能管理器 - 管理评估技能（可切换的评估体系）
+技能管理器 - B端履约中台评估体系
 
-每个 Skill 定义一套独立的：
-  - 需求拆解策略（page_feature / user_story）
-  - 工时估算方式（role_based / story_points）
-  - 输出角色配置（产品/前端/后端/测试 等）
+定义一套固定的评估标准：
+  - 需求拆解策略：按页面×功能点拆解
+  - 工时估算方式：S/M/L/XL/XXL 五档工时 + 测试公式（后端×0.35）
+  - 输出角色配置：产品 / 前端 / 后端 / 测试
 
-Skill 可从 knowledge/skills/*.json 加载，也有内置默认值。
-支持运行时切换；历史案例与代码知识库按 skill_id 隔离。
+历史案例与代码知识库按当前评估体系隔离。
 """
-import glob
 import json
 import logging
 import os
@@ -24,63 +22,12 @@ SKILLS_DIR        = os.path.join(_BASE_DIR, "knowledge", "skills")
 EXAMPLES_BASE_DIR = os.path.join(_BASE_DIR, "knowledge", "examples")
 CODE_KB_DIR       = os.path.join(_BASE_DIR, "knowledge", "code_knowledge")
 
-# ============================================================
-# 内置技能（当 JSON 文件不存在时作为 fallback）
-# ============================================================
-_BUILTIN_SKILLS: Dict[str, dict] = {
-    "standard": {
-        "id": "standard",
-        "name": "标准产品评估",
-        "description": "按页面×功能点拆解，按角色（产品/设计、前端、后端、测试）分别估算工时",
-        "version": "1.0",
-        "roles": ["产品/设计", "前端开发", "后端开发", "测试"],
-        "decomposition": {
-            "strategy": "page_feature",
-            "max_pages": 8,
-            "max_features_per_page": 10,
-            "focus": "从产品经理视角，按页面维度拆解功能点，区分新增/调整",
-        },
-        "estimation": {
-            "strategy": "role_based",
-            "base_rates": {
-                "新增页面-简单": {"产品/设计": 0.25, "前端开发": 0.5,  "后端开发": 0.3, "测试": 0.3},
-                "新增页面-中等": {"产品/设计": 0.5,  "前端开发": 1.0,  "后端开发": 0.8, "测试": 0.5},
-                "新增页面-复杂": {"产品/设计": 1.0,  "前端开发": 1.5,  "后端开发": 1.5, "测试": 1.0},
-                "调整页面-简单": {"产品/设计": 0.1,  "前端开发": 0.2,  "后端开发": 0.1, "测试": 0.2},
-                "调整页面-中等": {"产品/设计": 0.2,  "前端开发": 0.4,  "后端开发": 0.3, "测试": 0.3},
-                "调整页面-复杂": {"产品/设计": 0.5,  "前端开发": 0.8,  "后端开发": 0.8, "测试": 0.5},
-            },
-            "complexity_bonuses": {
-                "审批流": 0.3, "外部接口": 0.3, "批量操作": 0.2,
-                "复杂计算": 0.3, "多角色": 0.2, "实时数据": 0.2,
-            },
-        },
-    },
-    "agile": {
-        "id": "agile",
-        "name": "敏捷故事点评估",
-        "description": "按用户故事拆解，用斐波那契故事点（1/2/3/5/8/13）估算，适合敏捷团队",
-        "version": "1.0",
-        "roles": ["前端开发", "后端开发", "测试"],
-        "decomposition": {
-            "strategy": "user_story",
-            "story_format": "作为[角色]，我希望[做什么]，以便[获得价值]",
-            "max_stories": 10,
-            "focus": "从用户价值视角拆解，每个故事独立可交付，符合 INVEST 原则",
-        },
-        "estimation": {
-            "strategy": "story_points",
-            "point_scale": [1, 2, 3, 5, 8, 13],
-            "days_per_point": 0.8,
-            "role_ratios": {"前端开发": 0.4, "后端开发": 0.4, "测试": 0.2},
-        },
-    },
-}
+# 固定技能 ID — 只保留 B端履约中台
+SKILL_ID = "b_end_fulfillment"
 
 # ============================================================
 # 全局状态
 # ============================================================
-_current_skill_id: str = "b_end_fulfillment"
 _skills_cache: Dict[str, dict] = {}
 
 
@@ -89,80 +36,60 @@ _skills_cache: Dict[str, dict] = {}
 # ============================================================
 
 def list_skills() -> List[dict]:
-    """列出所有可用技能（文件系统 + 内置）"""
+    """返回唯一可用技能"""
     skills: List[dict] = []
-    seen: set = set()
-
-    # 文件系统技能优先
     if os.path.exists(SKILLS_DIR):
-        for fpath in sorted(glob.glob(os.path.join(SKILLS_DIR, "*.json"))):
+        fpath = os.path.join(SKILLS_DIR, f"{SKILL_ID}.json")
+        if os.path.exists(fpath):
             try:
                 with open(fpath, encoding="utf-8") as f:
                     s = json.load(f)
-                sid = s.get("id") or os.path.splitext(os.path.basename(fpath))[0]
                 skills.append({
-                    "id": sid,
-                    "name": s.get("name", sid),
+                    "id": s.get("id", SKILL_ID),
+                    "name": s.get("name", SKILL_ID),
                     "description": s.get("description", ""),
                     "version": s.get("version", "1.0"),
                     "source": "file",
                 })
-                seen.add(sid)
             except Exception as e:
                 logger.warning(f"加载技能文件失败: {fpath} - {e}")
-
-    # 补充内置技能
-    for sid, s in _BUILTIN_SKILLS.items():
-        if sid not in seen:
-            skills.append({
-                "id": sid,
-                "name": s["name"],
-                "description": s.get("description", ""),
-                "version": s.get("version", "1.0"),
-                "source": "builtin",
-            })
-
     return skills
 
 
 def get_skill(skill_id: Optional[str] = None) -> dict:
-    """获取技能完整配置，优先从文件加载，其次使用内置"""
-    sid = skill_id or _current_skill_id
+    """获取技能完整配置，仅支持 b_end_fulfillment"""
+    if skill_id and skill_id != SKILL_ID:
+        logger.warning(f"仅支持 {SKILL_ID} 技能，忽略传入的 skill_id={skill_id}")
+    sid = SKILL_ID
 
     if sid in _skills_cache:
         return _skills_cache[sid]
 
-    # 尝试文件加载
-    if os.path.exists(SKILLS_DIR):
-        fpath = os.path.join(SKILLS_DIR, f"{sid}.json")
-        if os.path.exists(fpath):
-            try:
-                with open(fpath, encoding="utf-8") as f:
-                    skill = json.load(f)
-                _skills_cache[sid] = skill
-                return skill
-            except Exception as e:
-                logger.warning(f"加载技能 {sid} 失败: {e}")
+    fpath = os.path.join(SKILLS_DIR, f"{sid}.json")
+    if os.path.exists(fpath):
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                skill = json.load(f)
+            _skills_cache[sid] = skill
+            return skill
+        except Exception as e:
+            logger.error(f"加载技能 {sid} 失败: {e}")
 
-    # fallback 到内置
-    skill = _BUILTIN_SKILLS.get(sid, _BUILTIN_SKILLS["standard"])
+    # 文件不存在时返回空配置（由节点内建的 prompt 兜底）
+    skill = {"id": sid, "name": "B端履约中台评估", "roles": ["产品", "前端开发", "后端开发", "测试"]}
     _skills_cache[sid] = skill
     return skill
 
 
 def get_current_skill_id() -> str:
-    return _current_skill_id
+    return SKILL_ID
 
 
 def set_current_skill(skill_id: str) -> bool:
-    """切换当前全局技能，返回是否成功"""
-    global _current_skill_id
-    available = {s["id"] for s in list_skills()}
-    if skill_id not in available:
-        logger.warning(f"技能不存在: {skill_id}，可用: {available}")
+    """始终返回 True，仅保留 b_end_fulfillment"""
+    if skill_id != SKILL_ID:
+        logger.warning(f"仅支持 {SKILL_ID} 技能，忽略切换请求")
         return False
-    _current_skill_id = skill_id
-    logger.info(f"技能已切换: {skill_id}")
     return True
 
 
@@ -264,10 +191,8 @@ def load_code_knowledge(query: str = "", limit: int = 3) -> str:
     candidates: List[tuple] = []
 
     # ── 1 & 2：扫描 Markdown/TXT/JSON 知识库文件 ─────────────────────
-    scan_dirs = [CODE_KB_DIR]
-    ext_dir = (AppConfig.CODE_KB_EXT_DIR or "").strip()
-    if ext_dir and os.path.isdir(ext_dir) and ext_dir != CODE_KB_DIR:
-        scan_dirs.append(ext_dir)
+    scan_dirs = [CODE_KB_DIR] + [d for d in AppConfig.CODE_KB_EXT_DIRS
+                                 if d and os.path.isdir(d) and d != CODE_KB_DIR]
 
     for kb_dir in scan_dirs:
         if not os.path.isdir(kb_dir):
@@ -292,16 +217,17 @@ def load_code_knowledge(query: str = "", limit: int = 3) -> str:
         if score > 0 or not query_terms:
             results.append(f"### {fname}\n{content}")
 
-    # ── 3：Java 源码自动扫描 ─────────────────────────────────────────
-    java_dir = (AppConfig.JAVA_SOURCE_DIR or "").strip()
-    if java_dir and os.path.isdir(java_dir):
-        try:
-            from agent.java_scanner import scan_java_source
-            java_summary = scan_java_source(java_dir)
-            if java_summary:
-                results.append(java_summary)
-        except Exception as e:
-            logger.warning(f"Java 源码扫描失败: {e}")
+    # ── 3：Java 源码自动扫描（支持多个目录）──────────────────────────
+    java_dirs = AppConfig.JAVA_SOURCE_DIRS or []
+    for java_dir in java_dirs:
+        if java_dir and os.path.isdir(java_dir):
+            try:
+                from agent.java_scanner import scan_java_source
+                java_summary = scan_java_source(java_dir)
+                if java_summary:
+                    results.append(java_summary)
+            except Exception as e:
+                logger.warning(f"Java 源码扫描失败 ({java_dir}): {e}")
 
     return "\n\n".join(results)
 

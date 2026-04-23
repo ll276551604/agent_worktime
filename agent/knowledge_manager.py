@@ -61,26 +61,26 @@ class KnowledgeManager:
         return self._load_json_file(KB_WORKTIME_RULES)
     
     def _load_business_docs(self) -> List[Dict]:
-        """加载业务文档知识库（支持 Markdown / JSON / TXT）"""
-        from config import BUSINESS_KB_DIR
+        """加载业务文档知识库（支持多个目录，Markdown / JSON / TXT）"""
+        from config import BUSINESS_KB_DIRS
         docs = []
-        if not os.path.exists(BUSINESS_KB_DIR):
-            logger.warning(f"业务知识库目录不存在: {BUSINESS_KB_DIR}")
-            return docs
-
-        for fname in sorted(os.listdir(BUSINESS_KB_DIR)):
-            fpath = os.path.join(BUSINESS_KB_DIR, fname)
-            if not os.path.isfile(fpath):
+        for kb_dir in BUSINESS_KB_DIRS:
+            if not os.path.exists(kb_dir):
+                logger.warning(f"业务知识库目录不存在: {kb_dir}")
                 continue
-            if not any(fname.endswith(ext) for ext in (".md", ".txt", ".json")):
-                continue
-            try:
-                with open(fpath, encoding="utf-8") as f:
-                    content = f.read()
-                docs.append(self._parse_business_doc(fname, content))
-                logger.debug(f"加载业务文档: {fname}")
-            except Exception as e:
-                logger.error(f"加载业务文档失败 {fname}: {e}")
+            for fname in sorted(os.listdir(kb_dir)):
+                fpath = os.path.join(kb_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                if not any(fname.endswith(ext) for ext in (".md", ".txt", ".json")):
+                    continue
+                try:
+                    with open(fpath, encoding="utf-8") as f:
+                        content = f.read()
+                    docs.append(self._parse_business_doc(fname, content))
+                    logger.debug(f"加载业务文档: {fname} ({kb_dir})")
+                except Exception as e:
+                    logger.error(f"加载业务文档失败 {fname}: {e}")
         return docs
 
     def _parse_business_doc(self, fname: str, content: str) -> Dict:
