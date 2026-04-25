@@ -35,6 +35,8 @@ class ChatSession:
         self.metadata: Dict = {}  # 存储额外信息如当前处理的文件ID等
         self.last_evaluation: Dict = {}  # 存储上次评估结果，用于反馈重新评估
         self.dialog_state: Dict = {}     # 对话状态: {in_confirm_stage, confirmed_fields, original_requirement}
+        self.temp_documents: List[Dict] = []  # 用户上传的临时文档（仅内存存储）
+        self.temp_knowledge_context: str = ""  # 临时文档提取的文本内容
 
     def add_message(self, role: str, content: str) -> ChatMessage:
         """添加消息"""
@@ -76,6 +78,27 @@ class ChatSession:
     def is_expired(self, timeout_hours: int = 2) -> bool:
         """检查会话是否过期"""
         return (time.time() - self.last_active) > (timeout_hours * 3600)
+
+    def add_temp_document(self, doc_info: Dict):
+        """添加临时文档到当前会话"""
+        self.temp_documents.append(doc_info)
+        self.update_knowledge_context()
+
+    def update_knowledge_context(self):
+        """更新知识库上下文文本"""
+        context_parts = []
+        for doc in self.temp_documents:
+            context_parts.append(f"【{doc['filename']}】\n{doc['content']}")
+        self.temp_knowledge_context = "\n".join(context_parts)
+
+    def get_temp_knowledge_context(self) -> str:
+        """获取临时知识库上下文"""
+        return self.temp_knowledge_context
+
+    def clear_temp_documents(self):
+        """清理临时文档（会话结束时调用）"""
+        self.temp_documents = []
+        self.temp_knowledge_context = ""
 
     def to_dict(self):
         return {
@@ -121,6 +144,8 @@ class SessionManager:
         """清理过期会话"""
         expired = [sid for sid, sess in self.sessions.items() if sess.is_expired(self.timeout_hours)]
         for sid in expired:
+            session = self.sessions[sid]
+            session.clear_temp_documents()
             logger.info(f"清理过期会话: {sid}")
             del self.sessions[sid]
 

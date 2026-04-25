@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 from excel import reader, writer
 from agent.graph import build_graph, KnowledgeLoader
 from agent.knowledge_manager import get_knowledge_manager
-from agent.evaluation_models import evaluate_requirement
 from config import REQUEST_DELAY, AppConfig
 
 # 评估结果缓存（简单的内存缓存）
@@ -670,36 +669,6 @@ def _answer_question(question: str, context: str, model_id: str = None) -> str:
         return f"抱歉，我暂时无法回答这个问题。错误: {str(e)}"
 
 
-def analyze_and_evaluate_requirements(requirements: List[Dict]) -> Dict[str, Any]:
-    """
-    分析和评估多个需求
-    :param requirements: 需求列表，每个需求包含 feature, detail, module
-    :return: 评估结果
-    """
-    kb_manager = get_knowledge_manager()
-    
-    results = []
-    total_days = 0.0
-    
-    for req in requirements:
-        # 使用新的评估模型
-        eval_result = evaluate_requirement(req)
-        
-        results.append({
-            "original_requirement": req,
-            "analysis": eval_result["analysis"],
-            "decomposition": eval_result["decomposition"],
-            "evaluation": eval_result["evaluation"],
-        })
-        
-        total_days += eval_result["evaluation"].get("effort_days", 0.0)
-    
-    return {
-        "results": results,
-        "total_days": round(total_days, 2),
-        "requirement_count": len(requirements),
-    }
-
 
 def export_to_excel(results: Dict[str, Any], output_path: str = None) -> str:
     """
@@ -808,56 +777,3 @@ def export_to_excel(results: Dict[str, Any], output_path: str = None) -> str:
     return output_path
 
 
-def evaluate_text_requirement(text: str, model_name: str = "composite") -> Dict[str, Any]:
-    """
-    评估文本需求（单条）
-    :param text: 需求文本
-    :param model_name: 评估模型名称
-    :return: 评估结果
-    """
-    lines = text.split('\n')
-    feature = lines[0].strip()[:80]
-    detail_lines = [l for l in lines[1:] if l.strip()]
-    detail = '\n'.join(detail_lines) if detail_lines else text
-    
-    req = {
-        "module": "",
-        "feature": feature,
-        "detail": detail,
-    }
-    
-    return evaluate_requirement(req, model_name)
-
-
-def format_evaluation_result(eval_result: Dict[str, Any]) -> str:
-    """
-    格式化评估结果为可读文本
-    """
-    analysis = eval_result["analysis"]
-    decomposition = eval_result["decomposition"]
-    evaluation = eval_result["evaluation"]
-    
-    result_text = f"""【需求分析】
-类型: {analysis.get('judgment', '未知')}（置信度: {int(analysis.get('confidence', 0)*100)}%）
-
-{'' if not analysis.get('related_modules') else f'相关模块: {", ".join(analysis["related_modules"])}'}
-{'' if not analysis.get('existing_features') else f'相似功能: {", ".join(analysis["existing_features"])}'}
-
-【初步拆解】
-"""
-    
-    for part in decomposition:
-        result_text += f"【{part.get('type')}】{part.get('name')}\n"
-        for feat in part.get('features', []):
-            result_text += f"  - {feat}\n"
-    
-    suggestions_text = '【建议】\n' + '\n'.join(analysis['suggestions']) if analysis.get('suggestions') else ''
-    result_text += f"""
-【工时评估】
-模型: {evaluation.get('model', '综合评估')}
-预估工时: {evaluation.get('effort_days', 0)} 天
-
-{suggestions_text}
-"""
-    
-    return result_text

@@ -8,6 +8,7 @@ import threading
 import time
 import logging
 from logging.handlers import RotatingFileHandler
+from datetime import datetime
 
 from flask import Flask, request, jsonify, Response, send_file, render_template
 from werkzeug.utils import secure_filename
@@ -193,32 +194,6 @@ def handle_request_too_large(e):
         "error": f"上传文件大小超过限制（最大 {MAX_UPLOAD_SIZE//1024//1024}MB）"
     }), 413
 
-# 存储上传文件信息和任务进度队列
-uploaded_files = {}   # file_id -> filepath
-task_queues   = {}    # task_id -> Queue
-task_timestamps = {}  # task_id -> 创建时间戳，用于清理超时任务
-
-# 定期清理超时任务（每30秒检查一次）
-def cleanup_expired_tasks():
-    while True:
-        try:
-            now = time.time()
-            expired_tasks = [tid for tid, ts in task_timestamps.items() if now - ts > 3600]  # 1小时超时
-            for tid in expired_tasks:
-                task_queues.pop(tid, None)
-                task_timestamps.pop(tid, None)
-                logger.info(f"清理超时任务: {tid}")
-        except Exception as e:
-            logger.error(f"清理任务时出错: {e}")
-        time.sleep(30)
-
-# 启动清理线程
-cleanup_thread = threading.Thread(target=cleanup_expired_tasks, daemon=True)
-cleanup_thread.start()
-
-
-def allowed_file(filename: str) -> bool:
-    return filename.lower().endswith(".xlsx")
 
 
 @app.route("/")
@@ -262,6 +237,142 @@ def get_session_history(session_id):
         "session_id": session_id,
         "history": session.get_history(),
     })
+
+
+def _parse_document(file_bytes, ext, filename):
+    """解析不同格式的文档"""
+    try:
+        if ext == ".pdf":
+            try:
+                import PyPDF2
+                from io import BytesIO
+                pdf_file = BytesIO(file_bytes)
+                reader = PyPDF2.PdfReader(pdf_file)
+                text_parts = []
+                for page in reader.pages:
+                    text_parts.append(page.extract_text())
+                return "\n".join(text_parts)
+            except:
+                return None
+        elif ext == ".xlsx":
+            try:
+                from openpyxl import load_workbook
+                from io import BytesIO
+                excel_file = BytesIO(file_bytes)
+                wb = load_workbook(excel_file)
+                text_parts = []
+                for sheet_name in wb.sheetnames:
+                    ws = wb[sheet_name]
+                    text_parts.append(f"\n=== {sheet_name} ===\n")
+                    for idx, row in enumerate(ws.iter_rows(values_only=True)):
+                        if idx > 100:
+                            text_parts.append("... [表格过长，已截断]")
+                            break
+                        row_text = " | ".join(str(cell) if cell is not None else "" for cell in row)
+                        text_parts.append(row_text)
+                return "\n".join(text_parts)
+            except:
+                return None
+        elif ext == ".docx":
+            try:
+                from docx import Document
+                from io import BytesIO
+                docx_file = BytesIO(file_bytes)
+                doc = Document(docx_file)
+                text_parts = []
+                for para in doc.paragraphs:
+                    text_parts.append(para.text)
+                for table in doc.tables:
+                    text_parts.append("\n[表格]\n")
+                    for row in table.rows:
+                        row_text = " | ".join(cell.text for cell in row.cells)
+                        text_parts.append(row_text)
+                return "\n".join(text_parts)
+            except:
+                return None
+        elif ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp"]:
+            return f"[图片文件: {ext}]\n(暂不支持自动OCR，请使用PDF或其他文本格式)"
+        elif ext in [".txt", ".md", ".log"]:
+            return file_bytes.decode('utf-8', errors='ignore')
+        else:
+            return None
+    except Exception as e:
+        logger.error(f"文档解析失败 ({filename}): {e}")
+        return None
+
+
+def _extract_interfaces(doc_content):
+    """从文档内容中提取接口名称"""
+    import re
+    interfaces = set()
+    patterns = [
+        r'(?:接口|API|api|endpoint)[\s：:]*([a-zA-Z0-9_\.\-/]+)',
+        r'(?:方法|Method)[\s：:]*(?:GET|POST|PUT|DELETE)\s+(/[a-zA-Z0-9_/\-]*)',
+        r'def\s+([a-zA-Z0-9_]+)\s*\(',
+        r'function\s+([a-zA-Z0-9_]+)\s*\(',
+        r'public\s+(?:void|String|int|boolean)\s+([a-zA-Z0-9_]+)\s*\(',
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, doc_content)
+        interfaces.update(matches)
+    return list(interfaces)[:20]
+
+
+@app.route("/upload_knowledge", methods=["POST"])
+def upload_knowledge():
+    """用户上传知识库文档（用于当前对话的上下文）"""
+    if "file" not in request.files:
+        return jsonify({"error": "未收到文件"}), 400
+
+    session_id = request.form.get("session_id")
+    if not session_id:
+        return jsonify({"error": "session_id 为空"}), 400
+
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "文件名为空"}), 400
+
+    try:
+        filename = secure_filename(f.filename)
+        file_bytes = f.read()
+        ext = os.path.splitext(filename)[1].lower()
+
+        doc_content = _parse_document(file_bytes, ext, filename)
+        if not doc_content:
+            return jsonify({"error": "无法解析该文件格式"}), 400
+
+        max_content_length = 10000
+        if len(doc_content) > max_content_length:
+            doc_content = doc_content[:max_content_length] + "\n... [文档过长，已截断]"
+
+        interfaces = _extract_interfaces(doc_content)
+
+        from agent.session_manager import SessionManager
+        session_mgr = SessionManager()
+        session = session_mgr.get_session(session_id)
+        if not session:
+            return jsonify({"error": "会话不存在"}), 404
+
+        session.add_temp_document({
+            "filename": filename,
+            "content": doc_content,
+            "interfaces": interfaces,
+            "upload_time": datetime.now().isoformat()
+        })
+
+        logger.info(f"临时文档上传: session={session_id}, file={filename}, size={len(file_bytes)}bytes")
+
+        return jsonify({
+            "success": True,
+            "filename": filename,
+            "document_count": len(session.temp_documents),
+            "extracted_interfaces": interfaces[:10],
+            "message": f"已上传 {filename}，提取到 {len(interfaces)} 个接口"
+        })
+
+    except Exception as e:
+        logger.error(f"文档上传失败: {e}")
+        return jsonify({"error": f"处理失败: {str(e)}"}), 500
 
 
 @app.route("/session/<session_id>/delete", methods=["POST"])
@@ -796,171 +907,6 @@ def chat_stream():
     return Response(generate(), mimetype='text/event-stream')
 
 
-@app.route("/upload", methods=["POST"])
-def upload():
-    logger.info("收到文件上传请求")
-    if "file" not in request.files:
-        logger.warning("上传请求中未包含文件")
-        return jsonify({"error": "未收到文件"}), 400
-
-    f = request.files["file"]
-    if not f.filename:
-        logger.warning("上传文件名为空")
-        return jsonify({"error": "文件名为空"}), 400
-    if not allowed_file(f.filename):
-        logger.warning(f"不支持的文件格式: {f.filename}")
-        return jsonify({"error": "仅支持 .xlsx 格式"}), 400
-
-    # 保存到独立目录，避免文件名冲突
-    file_id = str(uuid.uuid4())
-    save_dir = os.path.join(UPLOAD_FOLDER, file_id)
-    os.makedirs(save_dir, exist_ok=True)
-    filename = secure_filename(f.filename)
-    filepath = os.path.join(save_dir, filename)
-    f.save(filepath)
-    uploaded_files[file_id] = filepath
-
-    # 解析需求行供前端预览
-    try:
-        rows = reader.read_requirements(filepath)
-        logger.info(f"成功解析 Excel 文件: {filename}, 共 {len(rows)} 行需求")
-    except Exception as e:
-        logger.error(f"解析 Excel 失败: {e}")
-        return jsonify({"error": f"解析 Excel 失败：{e}"}), 400
-
-    # 统计已填写的行数
-    filled_count = sum(1 for r in rows if r.get("existing_g"))
-    
-    preview_rows = [
-        {
-            "row":        r["row"],
-            "module":     r["module"],
-            "feature":    r["feature"],
-            "detail":     r["detail"][:60] + ("..." if len(r["detail"]) > 60 else ""),
-            "has_g":      bool(r["existing_g"]),
-            "has_n":      r["existing_n"] is not None,
-        }
-        for r in rows
-    ]
-
-    return jsonify({
-        "file_id":      file_id,
-        "filename":     filename,
-        "total":        len(rows),
-        "filled_count": filled_count,
-        "rows":         preview_rows,
-    })
-
-
-@app.route("/process", methods=["POST"])
-def process():
-    data = request.get_json()
-    file_id     = data.get("file_id")
-    model_id    = data.get("model_id", DEFAULT_MODEL)
-    skip_filled = data.get("skip_filled", True)
-
-    if not file_id or file_id not in uploaded_files:
-        logger.warning(f"无效的 file_id: {file_id}")
-        return jsonify({"error": "无效的 file_id，请重新上传"}), 400
-
-    filepath = uploaded_files[file_id]
-    task_id  = str(uuid.uuid4())
-    q        = queue.Queue()
-    task_queues[task_id] = q
-    task_timestamps[task_id] = time.time()
-
-    logger.info(f"开始处理文件任务: task_id={task_id}, file={os.path.basename(filepath)}, model={model_id}")
-
-    def run():
-        def progress_cb(current, total, row_num, status, preview, page_count=0):
-            q.put({
-                "current":    current,
-                "total":      total,
-                "row":        row_num,
-                "status":     status,
-                "preview":    preview,
-                "page_count": page_count,
-            })
-
-        try:
-            output_path = worktime_agent.run_agent(
-                filepath, skip_filled, model_id=model_id, 
-                progress_callback=progress_cb
-            )
-            q.put({"done": True, "filename": os.path.basename(output_path)})
-            logger.info(f"文件任务完成: task_id={task_id}, output={os.path.basename(output_path)}")
-        except Exception as e:
-            logger.error(f"文件任务失败: task_id={task_id}, error={e}")
-            q.put({"error": str(e)})
-
-    threading.Thread(target=run, daemon=True).start()
-    return jsonify({"task_id": task_id})
-
-
-@app.route("/progress/<task_id>")
-def progress(task_id):
-    q = task_queues.get(task_id)
-    if not q:
-        logger.warning(f"查询进度时任务不存在: {task_id}")
-        return jsonify({"error": "任务不存在"}), 404
-
-    def generate():
-        while True:
-            msg = q.get()
-            yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
-            if msg.get("done") or msg.get("error"):
-                task_queues.pop(task_id, None)
-                task_timestamps.pop(task_id, None)
-                break
-
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-@app.route("/process_text", methods=["POST"])
-def process_text():
-    data     = request.get_json()
-    text     = (data.get("text") or "").strip()
-    model_id = data.get("model_id", DEFAULT_MODEL)
-
-    if not text:
-        logger.warning("文本处理请求内容为空")
-        return jsonify({"error": "请输入需求内容"}), 400
-
-    task_id = str(uuid.uuid4())
-    q       = queue.Queue()
-    task_queues[task_id] = q
-    task_timestamps[task_id] = time.time()
-
-    logger.info(f"开始处理文本任务: task_id={task_id}, model={model_id}, text_length={len(text)}")
-
-    def run():
-        def progress_cb(current, total, row_num, status, preview, page_count=0):
-            q.put({
-                "current":    current,
-                "total":      total,
-                "row":        row_num,
-                "status":     status,
-                "preview":    preview,
-                "page_count": page_count,
-            })
-
-        try:
-            result = worktime_agent.run_text(text, model_id=model_id, progress_callback=progress_cb)
-            q.put({
-                "done":       True,
-                "g_text":     result["g_text"],
-                "total_days": result["total_days"],
-                "page_count": result["page_count"],
-            })
-            logger.info(f"文本任务完成: task_id={task_id}, days={result['total_days']}, pages={result['page_count']}")
-        except Exception as e:
-            logger.error(f"文本任务失败: task_id={task_id}, error={e}")
-            q.put({"error": str(e)})
-
-    threading.Thread(target=run, daemon=True).start()
-    return jsonify({"task_id": task_id})
-
 
 @app.route("/download/<path:filename>")
 def download(filename):
@@ -988,79 +934,6 @@ def download(filename):
 
 
 # ============================================================
-# 增强评估接口（支持新的评估模型）
-# ============================================================
-@app.route("/evaluate", methods=["POST"])
-def evaluate():
-    """
-    评估需求（使用新的评估模型）
-    :param text: 需求文本
-    :param model_name: 评估模型名称 (fpa/cocomo/storypoint/rule/composite)
-    :return: 评估结果
-    """
-    data = request.get_json()
-    text = (data.get("text") or "").strip()
-    model_name = data.get("model_name", "composite")
-    
-    if not text:
-        return jsonify({"error": "需求内容为空"}), 400
-    
-    logger.info(f"评估请求: model={model_name}, text_length={len(text)}")
-    
-    try:
-        eval_result = worktime_agent.evaluate_text_requirement(text, model_name)
-        formatted_result = worktime_agent.format_evaluation_result(eval_result)
-        
-        return jsonify({
-            "success": True,
-            "analysis": eval_result["analysis"],
-            "decomposition": eval_result["decomposition"],
-            "evaluation": eval_result["evaluation"],
-            "formatted_result": formatted_result,
-        })
-    except Exception as e:
-        logger.error(f"评估失败: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/evaluate_batch", methods=["POST"])
-def evaluate_batch():
-    """
-    批量评估需求
-    :param requirements: 需求列表，每个需求包含 feature, detail, module
-    :param model_name: 评估模型名称
-    :return: 批量评估结果
-    """
-    data = request.get_json()
-    requirements = data.get("requirements", [])
-    model_name = data.get("model_name", "composite")
-    
-    if not requirements:
-        return jsonify({"error": "需求列表为空"}), 400
-    
-    logger.info(f"批量评估请求: model={model_name}, count={len(requirements)}")
-    
-    try:
-        # 转换需求格式
-        req_list = []
-        for req in requirements:
-            req_list.append({
-                "module": req.get("module", ""),
-                "feature": req.get("feature", ""),
-                "detail": req.get("detail", ""),
-            })
-        
-        results = worktime_agent.analyze_and_evaluate_requirements(req_list)
-        return jsonify({
-            "success": True,
-            "results": results["results"],
-            "total_days": results["total_days"],
-            "requirement_count": results["requirement_count"],
-        })
-    except Exception as e:
-        logger.error(f"批量评估失败: {e}")
-        return jsonify({"error": str(e)}), 500
-
 
 # ============================================================
 # 技能管理接口
