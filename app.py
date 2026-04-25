@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 # 初始化目录
 AppConfig.init_folders()
 
-from excel import reader
+# from excel import reader  # 已删除，不再使用批量导入
 from agent import worktime_agent
 
 app = Flask(__name__)

@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = logging.getLogger(__name__)
 
-from excel import reader, writer
+from excel import writer
 from agent.graph import build_graph, KnowledgeLoader
 from agent.knowledge_manager import get_knowledge_manager
 from config import REQUEST_DELAY, AppConfig
@@ -47,129 +47,10 @@ def _set_cached_result(req: Dict, result: Dict):
 def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
               model_id: str = None, progress_callback=None, skill_id: str = None) -> str:
     """
-    完整工时拆解流程：读取 → LangGraph 智能评估（含技能注入）→ 回填 Excel（G列+N列）
-
-    progress_callback: fn(current, total, row_num, status, preview, page_count)
+    该函数已被弃用：批量 Excel 处理功能已删除。
+    请使用 /chat 接口进行对话式评估。
     """
-    from agent import skill_manager as sm
-
-    rows = reader.read_requirements(filepath)
-    if not rows:
-        raise ValueError("未找到任何需求行，请检查 Excel 格式和工作表名称")
-
-    # 加载技能配置（整批共享）
-    sid          = skill_id or sm.get_current_skill_id()
-    skill_config = sm.get_skill(sid)
-    examples     = sm.load_examples(sid, limit=3)
-
-    kb    = KnowledgeLoader().load()
-    graph = build_graph()
-
-    total   = len(rows)
-    results = []
-
-    for i, row_data in enumerate(rows):
-        row_num = row_data["row"]
-
-        # 跳过已填写的行
-        if skip_filled and row_data.get("existing_g"):
-            results.append({
-                "row":          row_num,
-                "g_column_text": row_data["existing_g"],
-                "days":         row_data["existing_n"],
-                "skipped":      True,
-            })
-            if progress_callback:
-                progress_callback(i + 1, total, row_num, "skipped", "（已有内容，跳过）", 0)
-            continue
-
-        print(f"[Agent] 处理行 {row_num} ({i+1}/{total}) skill={sid}", flush=True)
-        try:
-            req = {
-                "module":  row_data.get("module", ""),
-                "feature": row_data.get("feature", ""),
-                "detail":  row_data.get("detail", ""),
-            }
-
-            # 强制：使用知识库分析需求类型（新增/调整）
-            from agent.knowledge_manager import get_knowledge_manager
-            km = get_knowledge_manager()
-            kb_analysis = km.analyze_requirement(req)
-            req_type = kb_analysis.get("judgment", "新增")
-            
-            # 如果是调整需求，获取关联的现有功能作为拆解参考
-            related_features = kb_analysis.get("existing_features", [])
-            related_modules = kb_analysis.get("related_modules", [])
-            
-            logger.info(f"[Agent] 需求分析: 行 {row_num}, 类型={req_type}, 关联功能={related_features}")
-
-            # 缓存检查（缓存 key 包含 skill_id 和需求类型）
-            cache_req = {**req, "_skill": sid, "_type": req_type}
-            cached_result = _get_cached_result(cache_req)
-            if cached_result:
-                logger.info(f"[Agent] 命中缓存: 行 {row_num}")
-                state_out = cached_result
-            else:
-                code_ctx  = sm.load_code_knowledge(
-                    query=f"{req['feature']} {req['detail'][:60]}", limit=2)
-                
-                # 构建分析上下文
-                analysis_context = {
-                    "requirement_type": req_type,
-                    "related_features": related_features,
-                    "related_modules": related_modules,
-                }
-                
-                state_out = graph.invoke({
-                    "raw_requirement":  req,
-                    "model_id":         model_id,
-                    "kb_feature_rules": kb["kb_feature_rules"],
-                    "kb_system_caps":   kb["kb_system_caps"],
-                    "kb_business_docs": kb["kb_business_docs"],
-                    "skill_id":         sid,
-                    "skill_config":     skill_config,
-                    "skill_examples":   examples,
-                    "code_context":     code_ctx,
-                    "pages_features":   [],
-                    "kb_cases":         [],
-                    "g_column_text":    "",
-                    "total_days":       0.0,
-                    "role_breakdown":   {},
-                    "retry_count":      0,
-                    "errors":           [],
-                    "analysis_context": analysis_context,  # 新增：分析上下文
-                })
-                _set_cached_result(cache_req, state_out)
-
-            g_text     = state_out.get("g_column_text", "")
-            total_days = state_out.get("total_days", 1.0)
-            page_count = len(state_out.get("pages_features", []))
-
-            results.append({
-                "row":           row_num,
-                "g_column_text": g_text,
-                "days":          total_days,
-                "skipped":       False,
-            })
-
-            preview = g_text.split("\n")[0][:60] if g_text else ""
-            if progress_callback:
-                progress_callback(i + 1, total, row_num, "done", preview, page_count)
-
-        except Exception as e:
-            results.append({
-                "row":           row_num,
-                "g_column_text": f"[处理失败] {str(e)}",
-                "days":          None,
-                "skipped":       False,
-            })
-            if progress_callback:
-                progress_callback(i + 1, total, row_num, "error", str(e), 0)
-
-        if i < total - 1:
-            time.sleep(REQUEST_DELAY)
-
-    return writer.write_results(filepath, results)
+    raise NotImplementedError("批量处理功能已被删除。请使用 /chat 接口进行对话式评估。")
 
 
 def format_eval_result_for_g_column(eval_result: dict) -> str:
