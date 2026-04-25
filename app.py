@@ -674,9 +674,16 @@ def chat():
     # ── 正常评估结果 ─────────────────────────────────────────
     pages_features = result.get("pages_features", [])
     role_breakdown = result.get("role_breakdown", {})
-    formatted_result = result["g_text"]
 
-    # 智能识别提示头
+    # 生成表格格式的输出
+    table_output = worktime_agent.format_evaluation_as_table({
+        "pages_features": pages_features,
+        "total_days": result["total_days"],
+        "role_breakdown": role_breakdown,
+    }, session_knowledge=session_knowledge)
+
+    # 智能识别提示头 + 表格格式
+    formatted_result = table_output
     note_parts = []
     if auto_detected["module_detected"]:
         note_parts.append(f"模块：{info['module']}")
@@ -685,7 +692,7 @@ def chat():
     if note_parts:
         formatted_result = f"【智能识别】{'、'.join(note_parts)}\n\n" + formatted_result
 
-    process_log.append("评估完成，生成最终拆解与工时结果")
+    process_log.append("评估完成，生成表格格式的拆解与工时结果")
     session.add_message("assistant", formatted_result)
     logger.info(f"评估完成: session={session_id} skill={skill_id} "
                 f"pages={len(pages_features)} days={result['total_days']}")
@@ -898,15 +905,24 @@ def chat_stream():
                 "g_text": result["g_text"],
                 "pages_features": result.get("pages_features", []),
             })
-            session.add_message("assistant", result["g_text"])
-            
+
+            # 生成表格格式的输出
+            pages_features = result.get("pages_features", [])
+            table_output = worktime_agent.format_evaluation_as_table({
+                "pages_features": pages_features,
+                "total_days": result["total_days"],
+                "role_breakdown": result.get("role_breakdown", {}),
+            }, session_knowledge=session_knowledge)
+
+            session.add_message("assistant", table_output)
+
             # 发送评估结果
             result_data = {
                 'type': 'complete',
                 'stage': 'assessment',
                 'intent': intent,
                 'intent_reason': intent_reason,
-                'g_text': result['g_text'],
+                'g_text': table_output,
                 'total_days': result['total_days'],
                 'role_breakdown': result.get('role_breakdown', {}),
                 'pages_features': result.get('pages_features', []),

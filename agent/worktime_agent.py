@@ -809,42 +809,51 @@ def format_evaluation_as_table(evaluation_result: dict, session_knowledge: str =
     role_breakdown = evaluation_result.get("role_breakdown", {})
 
     if not pages_features:
-        return "未生成评估结果"
+        return "【评估结果】\n\n暂无拆解细节，请补充需求描述。"
 
-    # 构建表格头
+    # 构建评估概览
     lines = []
-    lines.append("| 序号 | 改造点 | 页面类型 | 功能描述 | 接口 | 工时(天) |")
-    lines.append("|------|--------|---------|---------|------|----------|")
+    lines.append("【需求拆解 & 工时评估结果】\n")
+
+    # 构建表格头（简化格式）
+    lines.append("| 序号 | 改造点名称 | 类型 | 功能描述 |")
+    lines.append("|------|-----------|------|---------|")
 
     # 添加数据行
     for idx, item in enumerate(pages_features, 1):
         page_name = item.get("页面", "")
         page_type = item.get("类型", "新增")
         features = item.get("功能点", [])
-        interfaces = item.get("接口", [])
-        effort = item.get("工时", 0)
 
-        # 功能描述（多个功能点用、分隔）
-        features_text = "、".join(features) if features else "（无）"
-
-        # 接口信息
-        if interfaces:
-            interfaces_text = "、".join(interfaces) if isinstance(interfaces, list) else interfaces
+        # 功能描述（缩短显示）
+        if features:
+            if len(features) <= 2:
+                features_text = "、".join(features)
+            else:
+                features_text = "、".join(features[:2]) + f"等{len(features)}项"
         else:
-            interface_count = len(features)
-            interfaces_text = f"新增{interface_count}个" if interface_count > 0 else "（无）"
+            features_text = "（无）"
 
-        # 页面信息
-        page_info = f"{page_name}({page_type})"
+        # 截断过长的文本
+        if len(features_text) > 60:
+            features_text = features_text[:57] + "..."
 
         # 添加行
-        lines.append(f"| {idx} | {page_info} | {page_type} | {features_text} | {interfaces_text} | {effort} |")
+        lines.append(f"| {idx} | {page_name} | {page_type} | {features_text} |")
 
-    # 添加合计行
-    lines.append("|------|--------|---------|---------|------|----------|")
-    role_text = "、".join(f"{k}:{v}天" for k, v in role_breakdown.items()) if role_breakdown else "未评估"
-    lines.append(f"| 合计 | - | - | - | - | **{total_days}天** |")
-    lines.append(f"\n工时分配：{role_text}")
+    # 添加工时统计
+    lines.append("\n【工时评估】\n")
+    lines.append(f"**总计：{total_days} 天**\n")
+
+    # 角色工时分配
+    if role_breakdown:
+        lines.append("工时分配明细：")
+        for role, hours in role_breakdown.items():
+            lines.append(f"  • {role}: {hours} 天")
+    else:
+        lines.append("工时分配：未详细分配")
+
+    lines.append(f"\n拆解功能点数：{len(pages_features)} 个")
 
     return "\n".join(lines)
 
