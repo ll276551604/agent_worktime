@@ -652,6 +652,56 @@
     .btn-attach:hover { background: var(--accent); color: var(--fg); }
     .btn-attach svg { width: 18px; height: 18px; }
 
+    .btn-doc-upload {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px; height: 34px;
+      border-radius: calc(var(--radius) - 2px);
+      color: var(--muted-fg);
+      transition: background 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-doc-upload:hover { background: var(--accent); color: var(--fg); }
+    .btn-doc-upload svg { width: 18px; height: 18px; }
+
+    .docs-display {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+    .doc-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      background: var(--accent);
+      border-radius: calc(var(--radius) - 4px);
+      font-size: 12px;
+      color: var(--fg);
+    }
+    .doc-item-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100px;
+    }
+    .doc-item-remove {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+      color: var(--muted-fg);
+      transition: color 0.15s;
+    }
+    .doc-item-remove:hover { color: var(--fg); }
+
     .text-input-wrap {
       flex: 1;
       position: relative;
@@ -890,7 +940,7 @@
 
     <div class="input-bar">
       <div class="input-box" id="input-box">
-        <!-- 文件上传按钮 -->
+        <!-- 文件上传按钮（Excel） -->
         <button class="btn-attach" id="btn-attach" title="上传 Excel 文件">
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
@@ -898,12 +948,20 @@
         </button>
         <input type="file" id="file-input" accept=".xlsx">
 
+        <!-- 文档上传按钮（支持多种格式） -->
+        <button class="btn-doc-upload" id="btn-doc-upload" title="上传参考文档（PDF/Excel/Word/图片/文本）">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+        </button>
+        <input type="file" id="doc-input" accept=".pdf,.xlsx,.xls,.docx,.doc,.png,.jpg,.jpeg,.gif,.txt" multiple>
+
         <!-- 文本输入框 -->
         <div class="text-input-wrap">
-          <input type="text" class="text-input" id="text-input" placeholder="输入需求描述，或上传 Excel 文件批量处理...">
+          <input type="text" class="text-input" id="text-input" placeholder="输入需求描述...">
         </div>
 
-        <!-- 已上传文件显示 -->
+        <!-- 已上传文件显示（Excel） -->
         <div class="file-display hidden" id="file-display">
           <span class="file-name" id="file-name"></span>
           <span class="file-tag" id="file-tag"></span>
@@ -913,6 +971,9 @@
             </svg>
           </button>
         </div>
+
+        <!-- 已上传文档显示 -->
+        <div class="docs-display hidden" id="docs-display"></div>
 
         <!-- 发送按钮 -->
         <button class="btn-send" id="btn-send" disabled title="发送">
@@ -1077,6 +1138,13 @@
     if (e.target.files[0]) handleFile(e.target.files[0]);
   });
 
+  document.getElementById('btn-doc-upload').addEventListener('click', () => {
+    document.getElementById('doc-input').click();
+  });
+  document.getElementById('doc-input').addEventListener('change', (e) => {
+    if (e.target.files.length > 0) handleDocuments(e.target.files);
+  });
+
   const shell = document.getElementById('app-shell');
   shell.addEventListener('dragover', (e) => { e.preventDefault(); shell.classList.add('drag-over'); });
   shell.addEventListener('dragleave', (e) => {
@@ -1129,6 +1197,82 @@
     } catch (e) {
       showError('上传失败：' + e.message);
       clearFileDisplay();
+    }
+  }
+
+  async function handleDocuments(files) {
+    const docDisplay = document.getElementById('docs-display');
+    docDisplay.innerHTML = '';
+
+    for (const file of files) {
+      const validTypes = ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'png', 'jpg', 'jpeg', 'gif', 'txt'];
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (!validTypes.includes(ext)) {
+        showError(`不支持的文件格式：${file.name}，请上传 PDF、Excel、Word、图片或文本文件`);
+        continue;
+      }
+      if (file.size > 50 * 1024 * 1024) {
+        showError(`文件超过 50MB 限制：${file.name}`);
+        continue;
+      }
+
+      const fd = new FormData();
+      fd.append('file', file);
+
+      try {
+        // 构建上传URL，如果有session则带上session_id
+        let uploadUrl = '/upload_knowledge';
+        if (currentSessionId) {
+          uploadUrl += `?session_id=${currentSessionId}`;
+        }
+
+        const resp = await fetch(uploadUrl, { method: 'POST', body: fd });
+        const data = await resp.json();
+
+        if (data.error) {
+          showError(`上传失败：${data.error}`);
+          continue;
+        }
+
+        // 如果后端创建了新session，保存它
+        if (data.session_id && !currentSessionId) {
+          currentSessionId = data.session_id;
+          localStorage.setItem('wt_session_id', currentSessionId);
+        }
+
+        // 显示上传成功的文档
+        const docItem = document.createElement('div');
+        docItem.className = 'doc-item';
+        docItem.innerHTML = `
+          <span class="doc-item-name" title="${file.name}">${file.name}</span>
+          <span class="doc-item-remove" onclick="removeDocument(this)">✕</span>
+        `;
+        docDisplay.appendChild(docItem);
+
+        // 显示提取的接口信息（如果有）
+        if (data.interfaces && data.interfaces.length > 0) {
+          showSuccess(`文件已上传，提取到接口：${data.interfaces.slice(0, 5).join('、')}${data.interfaces.length > 5 ? '等' : ''}`);
+        } else {
+          showSuccess(`文件 ${file.name} 已上传为参考文档`);
+        }
+      } catch (e) {
+        showError(`上传失败：${e.message}`);
+      }
+    }
+
+    if (docDisplay.children.length > 0) {
+      docDisplay.classList.remove('hidden');
+    }
+
+    // 清空输入框
+    document.getElementById('doc-input').value = '';
+  }
+
+  function removeDocument(el) {
+    const docItem = el.closest('.doc-item');
+    docItem.remove();
+    if (document.getElementById('docs-display').children.length === 0) {
+      document.getElementById('docs-display').classList.add('hidden');
     }
   }
 

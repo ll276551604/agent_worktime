@@ -324,9 +324,8 @@ def upload_knowledge():
     if "file" not in request.files:
         return jsonify({"error": "未收到文件"}), 400
 
-    session_id = request.form.get("session_id")
-    if not session_id:
-        return jsonify({"error": "session_id 为空"}), 400
+    # 从query参数或form获取session_id
+    session_id = request.args.get("session_id") or request.form.get("session_id")
 
     f = request.files["file"]
     if not f.filename:
@@ -349,9 +348,15 @@ def upload_knowledge():
 
         from agent.session_manager import SessionManager
         session_mgr = SessionManager()
-        session = session_mgr.get_session(session_id)
+
+        # 如果没有session_id或session不存在，创建新session
+        session = None
+        if session_id:
+            session = session_mgr.get_session(session_id)
+
         if not session:
-            return jsonify({"error": "会话不存在"}), 404
+            session = session_mgr.create_session()
+            session_id = session.session_id
 
         session.add_temp_document({
             "filename": filename,
@@ -364,9 +369,10 @@ def upload_knowledge():
 
         return jsonify({
             "success": True,
+            "session_id": session_id,
             "filename": filename,
             "document_count": len(session.temp_documents),
-            "extracted_interfaces": interfaces[:10],
+            "interfaces": interfaces[:10],
             "message": f"已上传 {filename}，提取到 {len(interfaces)} 个接口"
         })
 
@@ -581,6 +587,7 @@ def chat():
             process_log.append("执行全新需求拆解评估流程")
 
         # ── 执行需求拆解与工时评估 ────────────────────────────
+        session_knowledge = session.get_temp_knowledge_context()
         try:
             result = worktime_agent.run_chat(
                 text=full_text,
@@ -588,6 +595,7 @@ def chat():
                 context=history_ctx,
                 skill_id=skill_id,
                 last_evaluation=last_evaluation,
+                session_knowledge=session_knowledge,
             )
         except Exception as e:
             logger.error(f"需求拆解评估失败: {e}", exc_info=True)
@@ -864,12 +872,14 @@ def chat_stream():
             
             # 执行评估
             try:
+                session_knowledge = session.get_temp_knowledge_context()
                 result = worktime_agent.run_chat(
                     text=full_text,
                     model_id=model_id,
                     context=history_ctx,
                     skill_id=skill_id,
                     last_evaluation=last_evaluation,
+                    session_knowledge=session_knowledge,
                 )
             except Exception as e:
                 error_data = {'type': 'error', 'message': '评估失败: ' + str(e)}

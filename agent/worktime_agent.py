@@ -221,7 +221,7 @@ def run_text(text: str, model_id: str = None, progress_callback=None, skill_id: 
 
 def run_chat(text: str, model_id: str = None, progress_callback=None,
              context: str = "", skill_id: str = None, last_evaluation: dict = None,
-             thinking_callback=None) -> dict:
+             thinking_callback=None, session_knowledge: str = None) -> dict:
     """
     处理聊天消息（支持上下文 + 可切换技能 + 反馈重新评估）。
     - 需求描述过短时返回澄清追问（needs_clarification=True）
@@ -277,7 +277,12 @@ def run_chat(text: str, model_id: str = None, progress_callback=None,
     detail_lines = [l for l in lines[1:] if l.strip()]
     detail       = '\n'.join(detail_lines) if detail_lines else text
 
-    if context:
+    # 合并临时知识库和历史对话上下文
+    if session_knowledge and context:
+        detail = f"【用户上传的参考文档】\n{session_knowledge}\n\n【历史对话】\n{context}\n\n【当前需求】\n{detail}"
+    elif session_knowledge:
+        detail = f"【用户上传的参考文档】\n{session_knowledge}\n\n【当前需求】\n{detail}"
+    elif context:
         detail = f"【历史对话】\n{context}\n\n【当前需求】\n{detail}"
 
     # ── 澄清检查：描述过于简短时返回追问，避免无效评估 ────────
@@ -697,32 +702,32 @@ def export_to_excel(results: Dict[str, Any], output_path: str = None) -> str:
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
                          top=Side(style='thin'), bottom=Side(style='thin'))
     
-    # 表头
-    headers = ["序号", "原始需求", "需求类型", "已拆解需求", "产品工时(天)", "评估模型", "备注"]
+    # 表头（新增接口列）
+    headers = ["序号", "原始需求", "需求类型", "已拆解需求", "接口列表", "产品工时(天)", "评估模型", "备注"]
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = alignment
         cell.border = thin_border
-    
+
     # 填充数据
     row_num = 2
     for i, result in enumerate(results["results"], 1):
         req = result["original_requirement"]
         analysis = result["analysis"]
         evaluation = result["evaluation"]
-        
+
         # 序号
         ws.cell(row=row_num, column=1, value=i).border = thin_border
-        
+
         # 原始需求
         original_req = f"{req.get('module', '')} - {req.get('feature', '')}\n{req.get('detail', '')}"
         ws.cell(row=row_num, column=2, value=original_req).border = thin_border
-        
+
         # 需求类型（新增/调整）
         ws.cell(row=row_num, column=3, value=analysis.get("judgment", "未知")).border = thin_border
-        
+
         # 已拆解需求
         decomposition = result["decomposition"]
         decomposed_text = ""
@@ -731,13 +736,22 @@ def export_to_excel(results: Dict[str, Any], output_path: str = None) -> str:
             for feat in part.get('features', []):
                 decomposed_text += f"  - {feat}\n"
         ws.cell(row=row_num, column=4, value=decomposed_text.strip()).border = thin_border
-        
+
+        # 接口列表（新增字段）
+        interfaces = []
+        if isinstance(decomposition, list):
+            for part in decomposition:
+                if "interfaces" in part and part["interfaces"]:
+                    interfaces.extend(part["interfaces"])
+        interfaces_text = "、".join(interfaces) if interfaces else "新增接口"
+        ws.cell(row=row_num, column=5, value=interfaces_text).border = thin_border
+
         # 产品工时
-        ws.cell(row=row_num, column=5, value=evaluation.get("effort_days", 0)).border = thin_border
-        
+        ws.cell(row=row_num, column=6, value=evaluation.get("effort_days", 0)).border = thin_border
+
         # 评估模型
-        ws.cell(row=row_num, column=6, value=evaluation.get("model", "综合评估")).border = thin_border
-        
+        ws.cell(row=row_num, column=7, value=evaluation.get("model", "综合评估")).border = thin_border
+
         # 备注
         related_modules = analysis.get("related_modules", [])
         suggestions = analysis.get("suggestions", [])
@@ -746,25 +760,26 @@ def export_to_excel(results: Dict[str, Any], output_path: str = None) -> str:
             remark += f"相关模块: {', '.join(related_modules)}\n"
         if suggestions:
             remark += "\n".join(suggestions)
-        ws.cell(row=row_num, column=7, value=remark.strip()).border = thin_border
-        
+        ws.cell(row=row_num, column=8, value=remark.strip()).border = thin_border
+
         row_num += 1
-    
+
     # 添加合计行
     total_row = row_num
     ws.cell(row=total_row, column=1, value="合计").font = Font(bold=True)
     ws.cell(row=total_row, column=1, value="合计").border = thin_border
-    ws.cell(row=total_row, column=5, value=results["total_days"]).font = Font(bold=True)
-    ws.cell(row=total_row, column=5, value=results["total_days"]).border = thin_border
-    
+    ws.cell(row=total_row, column=6, value=results["total_days"]).font = Font(bold=True)
+    ws.cell(row=total_row, column=6, value=results["total_days"]).border = thin_border
+
     # 调整列宽
     ws.column_dimensions['A'].width = 8
     ws.column_dimensions['B'].width = 30
     ws.column_dimensions['C'].width = 12
     ws.column_dimensions['D'].width = 40
-    ws.column_dimensions['E'].width = 15
+    ws.column_dimensions['E'].width = 20
     ws.column_dimensions['F'].width = 15
-    ws.column_dimensions['G'].width = 30
+    ws.column_dimensions['G'].width = 15
+    ws.column_dimensions['H'].width = 30
     
     # 设置行高
     for row in range(1, total_row + 1):
@@ -773,7 +788,123 @@ def export_to_excel(results: Dict[str, Any], output_path: str = None) -> str:
     # 保存文件
     wb.save(output_path)
     logger.info(f"评估结果已导出到: {output_path}")
-    
+
     return output_path
+
+
+# ============================================================
+# Step 8: 表格格式化和接口识别函数
+# ============================================================
+
+def format_evaluation_as_table(evaluation_result: dict, session_knowledge: str = None) -> str:
+    """
+    将评估结果格式化为表格格式
+
+    :param evaluation_result: 评估结果字典，包含 pages_features, total_days, role_breakdown 等
+    :param session_knowledge: 用户上传的会话知识库（用于接口识别）
+    :return: 格式化的表格字符串
+    """
+    pages_features = evaluation_result.get("pages_features", [])
+    total_days = evaluation_result.get("total_days", 0)
+    role_breakdown = evaluation_result.get("role_breakdown", {})
+
+    if not pages_features:
+        return "未生成评估结果"
+
+    # 构建表格头
+    lines = []
+    lines.append("| 序号 | 改造点 | 页面类型 | 功能描述 | 接口 | 工时(天) |")
+    lines.append("|------|--------|---------|---------|------|----------|")
+
+    # 添加数据行
+    for idx, item in enumerate(pages_features, 1):
+        page_name = item.get("页面", "")
+        page_type = item.get("类型", "新增")
+        features = item.get("功能点", [])
+        interfaces = item.get("接口", [])
+        effort = item.get("工时", 0)
+
+        # 功能描述（多个功能点用、分隔）
+        features_text = "、".join(features) if features else "（无）"
+
+        # 接口信息
+        if interfaces:
+            interfaces_text = "、".join(interfaces) if isinstance(interfaces, list) else interfaces
+        else:
+            interface_count = len(features)
+            interfaces_text = f"新增{interface_count}个" if interface_count > 0 else "（无）"
+
+        # 页面信息
+        page_info = f"{page_name}({page_type})"
+
+        # 添加行
+        lines.append(f"| {idx} | {page_info} | {page_type} | {features_text} | {interfaces_text} | {effort} |")
+
+    # 添加合计行
+    lines.append("|------|--------|---------|---------|------|----------|")
+    role_text = "、".join(f"{k}:{v}天" for k, v in role_breakdown.items()) if role_breakdown else "未评估"
+    lines.append(f"| 合计 | - | - | - | - | **{total_days}天** |")
+    lines.append(f"\n工时分配：{role_text}")
+
+    return "\n".join(lines)
+
+
+def extract_interfaces_from_decomposition(decomposition_item: dict) -> list:
+    """
+    从拆解点中提取接口信息
+
+    :param decomposition_item: 单个拆解点 {"页面": "...", "功能点": [...], "类型": "..."}
+    :return: 提取的接口列表
+    """
+    import re
+
+    interfaces = []
+
+    # 获取功能点列表
+    features = decomposition_item.get("功能点", [])
+
+    # 从功能点描述中用正则提取接口名
+    patterns = [
+        r'(?:接口|API|api)[\s：:]*([a-zA-Z0-9_\-/]+)',
+        r'(?:调用|请求)[\s：:]*([a-zA-Z0-9_\-/]+)',
+    ]
+
+    for feature in features:
+        for pattern in patterns:
+            matches = re.findall(pattern, str(feature))
+            interfaces.extend(matches)
+
+    return list(set(interfaces)) if interfaces else []
+
+
+def search_interfaces_in_docs(decomposition_title: str, session_knowledge: str) -> list:
+    """
+    在用户上传的文档中搜索与分解点相关的接口
+
+    :param decomposition_title: 拆解点标题
+    :param session_knowledge: 用户上传的会话知识库内容
+    :return: 匹配到的接口列表
+    """
+    import re
+
+    if not session_knowledge:
+        return []
+
+    interfaces = set()
+
+    # 接口名称识别模式（多种格式）
+    patterns = [
+        r'(?:接口|API|api|endpoint)[\s：:]*([a-zA-Z0-9_\.\-/]+)',
+        r'(?:方法|Method|GET|POST|PUT|DELETE)[\s：:]*([a-zA-Z0-9_\-/]+)',
+        r'def\s+([a-zA-Z0-9_]+)\s*\(',
+        r'function\s+([a-zA-Z0-9_]+)\s*\(',
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(pattern, session_knowledge)
+        interfaces.update(matches)
+
+    # 返回前20个唯一接口
+    return list(interfaces)[:20]
 
 
