@@ -44,52 +44,6 @@ def _set_cached_result(req: Dict, result: Dict):
     _evaluation_cache[key] = result
 
 
-def run_agent(filepath: str, skip_filled: bool, api_key: str = None,
-              model_id: str = None, progress_callback=None, skill_id: str = None) -> str:
-    """
-    该函数已被弃用：批量 Excel 处理功能已删除。
-    请使用 /chat 接口进行对话式评估。
-    """
-    raise NotImplementedError("批量处理功能已被删除。请使用 /chat 接口进行对话式评估。")
-
-
-def format_eval_result_for_g_column(eval_result: dict) -> str:
-    """将智能评估结果格式化为 G 列文本"""
-    result = []
-    
-    # 需求分析
-    analysis = eval_result.get("analysis", {})
-    result.append(f"【需求分析】")
-    result.append(f"类型: {analysis.get('judgment', '未知')}（置信度: {analysis.get('confidence', 0)}%）")
-    
-    # 初步拆解
-    decomposition = eval_result.get("decomposition", [])
-    if decomposition:
-        result.append("")
-        result.append("【初步拆解】")
-        for part in decomposition:
-            result.append(f"【{part.get('type')}】{part.get('name')}")
-            for feat in part.get('features', []):
-                result.append(f"  - {feat}")
-    
-    # 工时评估
-    evaluation = eval_result.get("evaluation", {})
-    result.append("")
-    result.append("【工时评估】")
-    result.append(f"模型: {evaluation.get('model', '综合评估')}")
-    result.append(f"预估工时: {evaluation.get('effort_days', 0)} 天")
-    
-    # 建议
-    suggestions = analysis.get("suggestions", [])
-    if suggestions:
-        result.append("")
-        result.append("【建议】")
-        for suggestion in suggestions:
-            result.append(f"• {suggestion}")
-    
-    return "\n".join(result)
-
-
 def run_text(text: str, model_id: str = None, progress_callback=None, skill_id: str = None) -> dict:
     """
     处理单条文本需求（不写 Excel）。
@@ -739,62 +693,6 @@ def format_evaluation_as_table(evaluation_result: dict, session_knowledge: str =
     return "\n".join(lines)
 
 
-def extract_interfaces_from_decomposition(decomposition_item: dict) -> list:
-    """
-    从拆解点中提取接口信息
 
-    :param decomposition_item: 单个拆解点 {"页面": "...", "功能点": [...], "类型": "..."}
-    :return: 提取的接口列表
-    """
-    import re
-
-    interfaces = []
-
-    # 获取功能点列表
-    features = decomposition_item.get("功能点", [])
-
-    # 从功能点描述中用正则提取接口名
-    patterns = [
-        r'(?:接口|API|api)[\s：:]*([a-zA-Z0-9_\-/]+)',
-        r'(?:调用|请求)[\s：:]*([a-zA-Z0-9_\-/]+)',
-    ]
-
-    for feature in features:
-        for pattern in patterns:
-            matches = re.findall(pattern, str(feature))
-            interfaces.extend(matches)
-
-    return list(set(interfaces)) if interfaces else []
-
-
-def search_interfaces_in_docs(decomposition_title: str, session_knowledge: str) -> list:
-    """
-    在用户上传的文档中搜索与分解点相关的接口
-
-    :param decomposition_title: 拆解点标题
-    :param session_knowledge: 用户上传的会话知识库内容
-    :return: 匹配到的接口列表
-    """
-    import re
-
-    if not session_knowledge:
-        return []
-
-    interfaces = set()
-
-    # 接口名称识别模式（多种格式）
-    patterns = [
-        r'(?:接口|API|api|endpoint)[\s：:]*([a-zA-Z0-9_\.\-/]+)',
-        r'(?:方法|Method|GET|POST|PUT|DELETE)[\s：:]*([a-zA-Z0-9_\-/]+)',
-        r'def\s+([a-zA-Z0-9_]+)\s*\(',
-        r'function\s+([a-zA-Z0-9_]+)\s*\(',
-    ]
-
-    for pattern in patterns:
-        matches = re.findall(pattern, session_knowledge)
-        interfaces.update(matches)
-
-    # 返回前20个唯一接口
-    return list(interfaces)[:20]
 
 
